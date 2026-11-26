@@ -285,14 +285,22 @@ class ResolveSession:
         index = next((i + 1 for i, lb in enumerate(self._node_labels(item)) if lb.strip().lower() == want), None)
         if index is None:
             return False
+        norm = lambda v: v.replace("\\", "/").strip("/").lower()          # noqa: E731
         graph = _call(item, "GetNodeGraph", default=None)
-        target = graph if graph and hasattr(graph, "SetLUT") else item
-        ok = bool(_call(target, "SetLUT", index, rel_path, default=False))
-        got = _call(target, "GetLUT", index, default=None)
-        if isinstance(got, str):
-            norm = lambda s: s.replace("\\", "/").strip("/").lower()          # noqa: E731
-            return norm(got) == norm(rel_path) or (bool(rel_path) and norm(got).endswith(norm(rel_path)))
-        return ok
+        ok = False
+        # 버전에 따라 SetLUT 이 Graph 에 있거나 TimelineItem 에 있다. 경로 구분자도 두 가지를 다 시도한다.
+        for target in (graph, item):
+            if not target:
+                continue
+            for path in dict.fromkeys((rel_path, rel_path.replace("/", "\\"))):
+                ok = bool(_call(target, "SetLUT", index, path, default=False))
+                got = _call(target, "GetLUT", index, default=None)
+                if isinstance(got, str):
+                    if norm(got) == norm(rel_path) or (bool(rel_path) and norm(got).endswith(norm(rel_path))):
+                        return True
+                elif ok:
+                    return True
+        return False
 
     def refresh_luts(self) -> bool:
         """새로 만든 LUT 파일을 Resolve 가 찾도록 목록을 다시 읽게 한다."""
