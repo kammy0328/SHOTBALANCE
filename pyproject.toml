@@ -1,0 +1,19 @@
+[project]
+name = "balance"
+version = "0.1.0"
+description = "DaVinci Resolve shot balancing: exposure and white balance matching within groups"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "av>=12", "opencv-python-headless>=4.10,<6"]
+
+[project.scripts]
+balance = "balance.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["balance*"]
+
+[tool.setuptools.package-data]
+balance = ["web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

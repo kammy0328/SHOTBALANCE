@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+colour-science>=0.4.4
+scikit-image>=0.22
+pyinstaller>=6.6

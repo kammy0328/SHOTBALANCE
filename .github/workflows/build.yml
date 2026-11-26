@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # Resolve 18.5 이상의 스크립팅 모듈과 두루 맞는 버전
+      - name: Install
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+      - name: Models
+        run: python tools/get_models.py
+      - name: Test
+        run: python -m pytest -q
+      - name: Build exe
+        run: python -m PyInstaller packaging/balance.spec --noconfirm --clean
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Balance-windows
+          path: dist/Balance.exe
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Balance.exe
