@@ -89,6 +89,7 @@ class Engine:
         self.redo_stack: list[dict] = []
         self.quick: dict[str, str] = {}
         self.failed_writes: set[str] = set()
+        self.timelines: list[dict] = []
         self.faces = FaceEngine(config.model_dirs())
         self.rworker = Worker("resolve")
         self.n_workers = workers or int(np.clip((os.cpu_count() or 4) // 2, 1, 4))
@@ -138,6 +139,7 @@ class Engine:
             info = session.describe()
             store = ProjectStore((self.root / "demo") if demo else (self.root / "projects"), info["project"], info["project_id"])
             cuts = session.scan(store.settings["node_label"])
+            timelines = session.timelines()
         except ResolveError as e:
             with self.lock:
                 self.conn = {"status": "error", "message": str(e), "demo": demo}
@@ -151,6 +153,7 @@ class Engine:
         with self.lock:
             self._flush()
             self.session, self.store = session, store
+            self.timelines = timelines
             self.conn = {"status": "demo" if demo else "connected", "message": "", "demo": demo, **info}
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -182,11 +185,13 @@ class Engine:
                 self._connect(bool(self.conn.get("demo")))      # 다른 프로젝트가 열렸다: 처음부터 다시
                 return
             cuts = self.session.scan(self.store.settings["node_label"])
+            timelines = self.session.timelines()
         except ResolveError as e:
             self._toast(str(e), "error")
             return
         with self.lock:
             self.conn.update(info)
+            self.timelines = timelines
             self._set_cuts(cuts)
         self._bump()
         self._start_quick_thumbs()
@@ -399,6 +404,72 @@ class Engine:
         """재생헤드를 컷 가운데로, at_start 면 컷이 시작하는 프레임(경계)으로."""
         if self.session is not None and self.store is not None and self.store.settings["follow_selection"]:
             self.rworker.submit(self.session.goto, cut_id, at_start)
+
+    # ======================================================== 다른 타임라인
+    def sync_timelines(self, ids: list[str]) -> None:
+        """같은 소스를 쓰는 다른 타임라인(티저, 다른 버전)에 지금 값을 그대로 쓴다.
+        값은 새로 계산하지 않는다: 이 타임라인에서 정한 값을 소스 구간이 겹치는 컷에 복사한다."""
+        with self.lock:
+            ids = [t for t in ids if t != self.conn.get("timeline_id") and any(x["id"] == t for x in self.timelines)]
+            if self.store is None or self.session is None or self.job is not None or not ids:
+                return
+            self.job = {"kind": "sync", "total": len(ids), "done": 0, "active": [], "cancel": False}
+        self._bump(save=False)
+        self.rworker.submit(self._sync_timelines, ids)
+
+    def _sync_timelines(self, ids: list[str]) -> None:
+        job, label = self.job, self.store.settings["node_label"]
+        report: list[tuple[str, dict | None]] = []
+        try:
+            for tid in ids:
+                if job["cancel"]:
+                    break
+                name = next((t["name"] for t in self.timelines if t["id"] == tid), tid)
+                got = self.session.open_timeline(tid, label)
+                if got is None:
+                    report.append((name, None))
+                    continue
+                cuts, items = got
+                n = dict(ok=0, miss=0, nonode=0, fail=0)
+                with self.lock:
+                    written = self.store.data.setdefault("written", {}).setdefault(tid, {})
+                for cut in cuts:
+                    with self.lock:
+                        key = self.store.find(cut["key"])
+                        cdl = self._cdl(key) if key is not None else None
+                    if cdl is None:
+                        n["miss"] += 1
+                    elif cut["node_index"] is None:
+                        n["nonode"] += 1
+                    elif self.session.write_cdl(cut["id"], label, cdl[0], cdl[1], item=items[cut["id"]]):
+                        written[cut["id"]] = [list(cdl[0]), list(cdl[1])]
+                        n["ok"] += 1
+                    else:
+                        n["fail"] += 1
+                report.append((name, n))
+                with self.lock:
+                    job["done"] += 1
+                self._bump(save=False)
+        finally:
+            try:
+                self.session.restore_timeline()
+            except Exception:  # noqa: BLE001
+                pass
+            with self.lock:
+                self.job = None
+            self._bump()
+        for name, n in report:
+            if n is None:
+                self._toast(f"{name}: 타임라인을 열지 못했습니다", "error")
+                continue
+            msg = f"{name}: {n['ok']}컷에 적용"
+            if n["miss"]:
+                msg += f", 같은 소스가 없는 컷 {n['miss']}개"
+            if n["nonode"]:
+                msg += f", 노드가 없는 컷 {n['nonode']}개"
+            if n["fail"]:
+                msg += f", Resolve 가 받지 않은 컷 {n['fail']}개"
+            self._toast(msg, "warn" if (n["fail"] or n["nonode"]) else "ok")
 
     # ================================================================ 그룹
     def _order(self, key: str) -> int:
@@ -790,6 +861,7 @@ class Engine:
         with self.lock:
             base = {"version": self.version, "app": {"name": APP_NAME, "version": __version__},
                     "conn": dict(self.conn), "job": None, "groups": [], "cuts": [], "settings": {},
+                    "timelines": [dict(t) for t in self.timelines],
                     "spaces": spaces.options(), "can_undo": False, "can_redo": False,
                     "models": {"detector": self.faces.detector_ready, "recognizer": self.faces.recognizer_ready},
                     "steps": {"exp": config.EXP_STEP, "exp_fine": config.EXP_STEP_FINE,

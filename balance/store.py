@@ -125,19 +125,27 @@ class ProjectStore:
             self.touch()
         return c
 
-    def _inherit(self, key: str) -> dict | None:
+    def find(self, key: str) -> str | None:
+        """같은 소스 구간을 가리키는 저장된 키 (읽기 전용). 정확히 같은 키가 없으면,
+        같은 파일에서 이 구간의 절반 이상이 겹치는 키 가운데 가장 많이 겹치는 것."""
+        if key in self.cuts:
+            return key
         name, a, b = split_key(key)
         best, best_ov = None, 0.0
-        for k, c in self.cuts.items():
+        for k in self.cuts:
             n2, a2, b2 = split_key(k)
             if n2 != name:
                 continue
             ov = max(0, min(b, b2) - max(a, a2)) / max(1, b - a)
             if ov > best_ov:
-                best, best_ov = c, ov
-        if best is None or best_ov < 0.5:
+                best, best_ov = k, ov
+        return best if best_ov >= 0.5 else None
+
+    def _inherit(self, key: str) -> dict | None:
+        best = self.find(key)
+        if best is None:
             return None
-        c = copy.deepcopy(best)
+        c = copy.deepcopy(self.cuts[best])
         c["auto"] = None          # 구간이 달라졌으니 측정은 다시 한다
         return c
 

@@ -87,6 +87,7 @@ def _actions(engine: Engine, quit_cb):
         "settings": lambda d: engine.set_settings(**d),
         "goto": lambda d: engine.goto(str(d.get("id", "")), bool(d.get("start"))),
         "models": lambda d: engine.download_models(),
+        "sync": lambda d: engine.sync_timelines([str(x) for x in d.get("ids", [])]),
         "quit": lambda d: quit_cb(),
     }
 

@@ -149,6 +149,7 @@ class ResolveSession:
         return [str(_call(item, "GetNodeLabel", i, default="") or "") for i in range(1, n + 1)]
 
     def scan(self, node_label: str) -> list[dict]:
+        """현재 타임라인의 컷 목록. 이후의 write_cdl · goto 는 이 스캔 결과를 대상으로 한다."""
         project = self._project()
         tl = project.GetCurrentTimeline()
         if not tl:
@@ -156,8 +157,13 @@ class ResolveSession:
         d = self.describe()
         self._timeline, self._fps = tl, d["fps"]
         self._drop = str(_call(tl, "GetSetting", "timelineDropFrameTimecode", default="0")) == "1"
+        found, self._items = self._scan(tl, node_label, d["fps"])
+        return found
+
+    def _scan(self, tl, node_label: str, fps: float) -> tuple[list[dict], dict]:
+        d = {"fps": fps}
         want = node_label.strip().lower()
-        self._items = {}
+        items: dict[str, object] = {}
         found = []
         for t in range(1, int(_call(tl, "GetTrackCount", "video", default=0) or 0) + 1):
             if _call(tl, "GetIsTrackEnabled", "video", t, default=True) is False:
@@ -196,7 +202,7 @@ class ResolveSession:
                     cfps = float(str(props.get("FPS", "")).split()[0])
                 except (ValueError, IndexError):
                     cfps = d["fps"]
-                self._items[uid] = item
+                items[uid] = item
                 found.append(dict(
                     id=uid, name=str(_call(item, "GetName", default=name)), track=t, start=start, dur=dur,
                     src_path=path, proxy_path=proxy, src_name=name, src_in=src_in, src_out=src_out, fps=cfps,
@@ -209,13 +215,51 @@ class ResolveSession:
         found.sort(key=lambda c: (c["start"], c["track"]))
         for i, c in enumerate(found, 1):
             c["index"] = i
-        return found
+        return found, items
+
+    # ------------------------------------------------------------ 다른 타임라인
+    def timelines(self) -> list[dict]:
+        """프로젝트의 타임라인 목록 (이름만 읽으므로 빠르다)."""
+        project = self._project()
+        cur = project.GetCurrentTimeline()
+        cur_id = str(_call(cur, "GetUniqueId", default="")) if cur else ""
+        out = []
+        for i in range(1, int(_call(project, "GetTimelineCount", default=0) or 0) + 1):
+            tl = _call(project, "GetTimelineByIndex", i, default=None)
+            if not tl:
+                continue
+            tid = str(_call(tl, "GetUniqueId", default="") or tl.GetName())
+            out.append(dict(id=tid, name=str(tl.GetName()), current=tid == cur_id))
+        return out
+
+    def open_timeline(self, timeline_id: str, node_label: str) -> tuple[list[dict], dict] | None:
+        """다른 타임라인을 현재 타임라인으로 바꾸고 컷을 읽는다 (스캔 상태는 건드리지 않는다).
+        끝나면 restore_timeline 으로 원래 타임라인에 돌아와야 한다."""
+        project = self._project()
+        for i in range(1, int(_call(project, "GetTimelineCount", default=0) or 0) + 1):
+            tl = _call(project, "GetTimelineByIndex", i, default=None)
+            if tl and str(_call(tl, "GetUniqueId", default="") or tl.GetName()) == timeline_id:
+                if not _call(project, "SetCurrentTimeline", tl, default=False):
+                    return None
+                fps = _call(tl, "GetSetting", "timelineFrameRate", default=None) or self._fps
+                try:
+                    fps = float(fps)
+                except (TypeError, ValueError):
+                    fps = self._fps
+                return self._scan(tl, node_label, fps)
+        return None
+
+    def restore_timeline(self) -> bool:
+        if self._timeline is None:
+            return False
+        return bool(_call(self._project(), "SetCurrentTimeline", self._timeline, default=False))
 
     # ------------------------------------------------------------------ 쓰기
-    def write_cdl(self, cut_id: str, node_label: str, slope, offset) -> bool:
+    def write_cdl(self, cut_id: str, node_label: str, slope, offset, item=None) -> bool:
         """라벨이 node_label 인 노드에 CDL 을 쓴다. 노드 순서가 스캔 이후 바뀌었을 수 있으므로
-        쓰기 직전에 라벨로 다시 찾는다 (엉뚱한 노드의 프라이머리를 덮어쓰지 않기 위해)."""
-        item = self._items.get(cut_id)
+        쓰기 직전에 라벨로 다시 찾는다 (엉뚱한 노드의 프라이머리를 덮어쓰지 않기 위해).
+        item 을 주면 현재 스캔에 없는 클립(다른 타임라인)에 쓴다."""
+        item = item if item is not None else self._items.get(cut_id)
         if item is None:
             return False
         want = node_label.strip().lower()

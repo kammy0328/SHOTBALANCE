@@ -122,7 +122,8 @@ function renderBar() {
     const p = job.total ? job.done / job.total : 0.08;
     btn.style.setProperty("--p", p);
     $("#progress").style.setProperty("--p", p);
-    $("#match-label").textContent = job.cancel ? "멈추는 중" : job.kind === "models" ? "모델 받는 중" : `분석 중 ${job.done}/${job.total}`;
+    $("#match-label").textContent = job.cancel ? "멈추는 중" : job.kind === "models" ? "모델 받는 중"
+      : job.kind === "sync" ? `타임라인에 쓰는 중 ${job.done}/${job.total}` : `분석 중 ${job.done}/${job.total}`;
     btn.title = "누르면 멈춥니다";
   } else {
     $("#match-label").textContent = "자동 매칭";
@@ -827,6 +828,7 @@ function settingsPop() {
     <div class="pop-sep"></div>
     <button class="pop-item" data-do="import-groups">${icon("i-plus")}Resolve 의 그룹 가져오기</button>
     <button class="pop-item" data-do="rewrite">${icon("i-refresh")}모든 값을 Resolve 에 다시 쓰기</button>
+    ${(st.timelines || []).length > 1 ? `<button class="pop-item" data-do="timelines">${icon("i-layers")}다른 타임라인에 같은 값 쓰기</button>` : ""}
     ${st.models.detector && st.models.recognizer ? "" : `<button class="pop-item" data-do="models">${icon("i-target")}얼굴 인식 모델 내려받기</button>`}
     <div class="pop-foot">${st.app.name} ${st.app.version}${st.conn.resolve_version ? ", Resolve " + F.esc(st.conn.resolve_version) : ""}</div>`);
   $('[data-set="apply_mode"]', p).value = s.apply_mode;
@@ -843,6 +845,18 @@ function settingsPop() {
     const f = e.target.closest("select[data-set], input[data-set]");
     if (f) act("settings", { [f.dataset.set]: f.value });
   });
+  return p;
+}
+
+function timelinesPop() {
+  const others = (ui.st.timelines || []).filter((t) => !t.current), lab = F.esc(ui.st.settings.node_label);
+  const p = h("div", "pop is-wide", `<h3>다른 타임라인에 같은 값 쓰기</h3>
+    <p class="pop-text">티저나 다른 버전처럼 같은 소스 구간을 쓰는 컷에 지금 값을 그대로 씁니다. 그 타임라인의 ${lab} 노드 값은 덮어씁니다. 쓰는 동안 Resolve 가 타임라인을 잠깐 바꿨다가 돌아옵니다.</p>
+    <div class="tl-list">${others.map((t) => `<label class="tl-row"><input type="checkbox" value="${F.esc(t.id)}"><span>${F.esc(t.name)}</span></label>`).join("")}</div>
+    <div class="pop-actions"><button class="btn is-solid" data-run disabled>선택한 타임라인에 쓰기</button></div>`);
+  const run = $("[data-run]", p);
+  p.addEventListener("change", () => { run.disabled = !$$("input:checked", p).length; });
+  run.addEventListener("click", () => { const ids = $$("input:checked", p).map((x) => x.value); closePop(); act("sync", { ids }); });
   return p;
 }
 
@@ -953,6 +967,7 @@ function wire() {
     else if (d === "node-guide") openPop(b, nodeGuidePop(), "node");
     else if (d === "import-groups") { closePop(); act("group/import", { source: "resolve" }); }
     else if (d === "rewrite") { closePop(); act("apply", { force: true }); }
+    else if (d === "timelines") openPop($("#btn-settings"), timelinesPop(), "timelines");
     else if (d === "models") { closePop(); act("models"); toast("얼굴 인식 모델을 내려받습니다 (약 39MB)"); }
   });
 

@@ -276,7 +276,7 @@ export class DemoApi {
         this.restore(src.pop());
         break;
       }
-      case "apply": this.toast("미리보기에서는 Resolve 에 쓰지 않습니다"); break;
+      case "apply": case "sync": this.toast("미리보기에서는 Resolve 에 쓰지 않습니다"); break;
       case "models": case "rescan": case "goto": break;
       default: return { ok: false, error: "unknown action" };
     }

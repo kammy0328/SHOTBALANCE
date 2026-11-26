@@ -340,6 +340,35 @@ def test_values_follow_the_source_after_reedit(tmp_path):
     assert again.cut(k1)["intent"]["exp"] == 0.667
 
 
+def test_sync_other_timeline(eng):
+    """티저처럼 같은 소스를 쓰는 다른 타임라인에 값을 복사한다."""
+    s = eng.state()
+    assert [t["name"] for t in s["timelines"]] == ["MV_Edit_v07_color", "MV_Teaser_v03"] and s["timelines"][0]["current"]
+    project = eng.session._project()
+    teaser = project.GetTimelineByIndex(2)
+    n_events = len(eng.events)
+    eng.sync_timelines([s["timelines"][1]["id"]])
+    wait(lambda: eng.job is None)
+    settle(eng)
+    assert project.GetCurrentTimeline().GetName() == "MV_Edit_v07_color"      # 원래 타임라인으로 돌아온다
+    main = {c["name"]: c for c in eng.state()["cuts"]}
+
+    def cdl(item):
+        return [float(v) for v in item.cdl["Slope"].split()], [float(v) for v in item.cdl["Offset"].split()]
+
+    for i in (0, 1, 2, 3, 4, 7):                    # 그대로 쓴 컷과 짧게 자른 컷: 본편과 같은 값
+        item = teaser.items[i]
+        slope, offset = cdl(item)
+        t = main[item.shot.name]["total"]
+        assert np.allclose(slope, t["slope"], atol=1e-5) and np.allclose(offset, t["offset"], atol=1e-5), item.shot.name
+    assert teaser.items[5].cdl is None              # EXPOSURE 노드가 없는 컷
+    assert teaser.items[6].cdl is None              # 본편에서 쓰지 않은 구간
+    toast = next(e for e in eng.events[n_events:] if e.get("type") == "toast")
+    assert "6컷에 적용" in toast["text"] and "같은 소스가 없는 컷 1개" in toast["text"] and "노드가 없는 컷 1개" in toast["text"]
+    # 현재 타임라인의 쓰기 상태는 그대로다
+    assert not any(c["pending"] for c in eng.state()["cuts"])
+
+
 def test_helpers():
     t = dict(exp=1.0, wb=[1, 1, 1], slope=[2.0, 2.0, 2.0], offset=[0.0, -0.01, 0.0])
     assert cdl_values(t, "linear_gain") == ((2.0, 2.0, 2.0), (0.0, -0.01, 0.0))

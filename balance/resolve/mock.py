@@ -149,8 +149,21 @@ class MockTimeline:
 
 
 class MockProject:
-    def __init__(self, name, timeline, settings):
+    def __init__(self, name, timeline, settings, others=()):
         self.name, self.timeline, self.settings = name, timeline, settings
+        self.timelines = [timeline, *others]
+
+    def GetTimelineCount(self):
+        return len(self.timelines)
+
+    def GetTimelineByIndex(self, i):
+        return self.timelines[i - 1] if 1 <= i <= len(self.timelines) else None
+
+    def SetCurrentTimeline(self, tl):
+        if tl not in self.timelines:
+            return False
+        self.timeline = tl
+        return True
 
     def GetName(self):
         return self.name
@@ -204,8 +217,21 @@ def demo_resolve() -> MockResolve:
     tl = MockTimeline("MV_Edit_v07_color", items)
     prj = MockProject("데모 프로젝트", tl, {
         "colorScienceMode": "davinciYRGBColorManagedv2", "colorSpaceTimeline": "DaVinci WG/Intermediate",
-        "timelineFrameRate": "24"})
+        "timelineFrameRate": "24"}, others=[_teaser()])
     return MockResolve(prj)
+
+
+def _teaser() -> MockTimeline:
+    """같은 소스를 쓰는 티저 타임라인: 그대로 쓴 컷, 짧게 자른 컷, 본편에 없는 구간, 노드 없는 컷."""
+    plan = [(1, 10, None), (2, 14, 12), (4, 10, None), (11, 16, 10), (20, 10, 20), (19, 10, None), (3, 60, 8), (15, 10, None)]
+    items, pos = [], 86400
+    for n, (k, src_in, dur) in enumerate(plan):
+        shot, _g, _r, full = DEMO[k]
+        dur = dur or full
+        labels = ["EXPOSURE", "LOOK"] if n != 5 else ["LOOK"]
+        items.append(MockTimelineItem(f"tz-{n + 1:03d}", shot, pos, dur, src_in, None, labels))
+        pos += dur
+    return MockTimeline("MV_Teaser_v03", items)
 
 
 def demo_refs() -> dict[str, str]:
