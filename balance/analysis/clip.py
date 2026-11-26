@@ -149,6 +149,7 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
         # 4) 얼굴 · 스킨
         obs: list[dict] = []
         floors: list[tuple[list, float]] = []
+        bgs: list[tuple[list, float]] = []
         detector = "none"
         for i in rep:
             check()
@@ -162,8 +163,10 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
             floors.append(([v * float(2.0 ** offs[i]) for v in fl], sp * float(2.0 ** offs[i])))
             hints = src.face_hints(i, (h, w))
             gain = np.float32(2.0 ** offs[i])
+            boxes: list = []
             if hints is not None:
                 detector = "hint"
+                boxes = [f["box"] for f in hints[:MAX_FACES]]
                 for f in hints[:MAX_FACES]:
                     sk = measure.sample_skin(lin_hi, f["lm"], clipped, f.get("score", 0.99))
                     if sk is None:
@@ -175,6 +178,7 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                 detector = "yunet"
                 bgr = preview.detector_image(lin_hi)
                 dets = sorted(engine.detect(bgr), key=lambda d: -(d["box"][2] * d["box"][3] * d["score"]))[:MAX_FACES]
+                boxes = [d["box"] for d in dets]
                 for d in dets:
                     sk = measure.sample_skin(lin_hi, d["lm"], clipped, d["score"])
                     if sk is None or sk["quality"] < 0.12:
@@ -183,7 +187,14 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                     obs.append(dict(rgb=[v * float(gain) for v in sk["rgb"]], quality=sk["quality"], n=sk["n"],
                                     clip=sk["clip"], ident=None, emb=emb, size=sk["iod"] / w,
                                     box=[d["box"][0] / w, d["box"][1] / h, d["box"][2] / w, d["box"][3] / h]))
+            bg = measure.background_chroma(lin_hi[rows, cols], clipped[rows, cols],
+                                           [(b[0] - cols.start, b[1] - rows.start, b[2], b[3]) for b in boxes])
+            if bg is not None:
+                bgs.append(bg)
         faces = _cluster(obs)
+        if bgs:
+            merged["chroma_bg"] = [float(np.median([b[0][c] for b in bgs])) for c in range(2)]
+            merged["bg_frac"] = float(np.median([b[1] for b in bgs]))
         if floors:
             merged["black"] = [float(np.median([f[0][c] for f in floors])) for c in range(3)]
             merged["black_spread"] = float(np.median([f[1] for f in floors]))

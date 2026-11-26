@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -34,6 +35,10 @@ class MatchOptions:
     black_max: float = 0.03       # 이보다 큰 차이는 헤이즈가 아니라 피사체 차이로 본다
     black_solid: float = 0.0015   # 플로어 바로 위 띠와의 차이가 이 안이면 블랙이 면으로 깔려 있다고 본다
     black_depth: float = 0.25     # 플로어가 중간 밝기의 이 비율보다 밝으면 블랙 후보가 아니다
+    sat_dead: float = 0.045       # 채도 차이가 이보다 작으면(log2, 약 3%) 같은 것으로 본다
+    sat_split: float = 0.15       # 메타데이터가 같을 때, 채도 추정값이 이만큼(log2, 약 11%) 벌어져야 다른 카메라로 본다
+    sat_min_bg: float = 0.10      # 배경색이 화면의 이 비율 이상을 차지해야 채도 기준으로 쓴다
+    sat_limit: float = 0.6        # 자동 채도 한계 (log2. 0.66배 ~ 1.5배)
 
 
 @dataclass
@@ -42,6 +47,7 @@ class ShotIn:
     order: int
     analysis: dict | None
     excluded: bool = False
+    name: str = ""                # 클립 이름 (카메라 구분에 쓴다)
 
 
 @dataclass
@@ -62,6 +68,13 @@ class Auto:
     black_conf: str = "low"
     black_method: str = "none"         # ref | floor | none
     black_apply: bool = False
+    # 채도:  MATCH 노드의 LUT 로 들어간다. 채도를 넣을 때는 게인에 sat_k 를 곱해야 스킨이 제자리에 남는다
+    sat: float = 1.0
+    sat_k: list = field(default_factory=lambda: [1.0, 1.0, 1.0])
+    sat_conf: str = "low"
+    sat_method: str = "none"           # ref(기준 카메라) | camera | none
+    sat_apply: bool = False
+    cam: str = ""                      # 카메라 묶음 (A, B, …)
 
     def asdict(self) -> dict:
         return dict(exp=round(float(self.exp), 4), wb=[round(float(v), 5) for v in self.wb],
@@ -69,7 +82,9 @@ class Auto:
                     notes=list(dict.fromkeys(self.notes)), exp_apply=bool(self.exp_apply), wb_apply=bool(self.wb_apply),
                     black=round(float(self.black), 5), black_k=[round(float(v), 5) for v in self.black_k],
                     black_o=[round(float(v), 6) for v in self.black_o], black_conf=self.black_conf,
-                    black_method=self.black_method, black_apply=bool(self.black_apply))
+                    black_method=self.black_method, black_apply=bool(self.black_apply),
+                    sat=round(float(self.sat), 4), sat_k=[round(float(v), 5) for v in self.sat_k],
+                    sat_conf=self.sat_conf, sat_method=self.sat_method, sat_apply=bool(self.sat_apply), cam=self.cam)
 
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
@@ -413,6 +428,7 @@ def match_group(shots: list[ShotIn], ref_id: str | None, mode: str = "reference"
                     r.method, r.wb_method = "median", "median"
 
     _match_black(usable, res, stats, anchor, ref_id, opts, info)
+    _match_sat(usable, res, stats, faces, gid_of, anchor, ref_id, opts, info)
     return {k: v.asdict() for k, v in res.items()}, info
 
 
@@ -490,3 +506,146 @@ def _match_black(usable, res, stats, anchor, ref_id, opts: MatchOptions, info: d
         if abs(r.black) < opts.black_dead and float(np.max(np.abs(o))) < 2 * opts.black_dead:
             r.black, r.black_k, r.black_o = 0.0, [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]     # 이미 맞아 있다
         r.black_conf, r.black_apply = conf, conf != "low"
+
+
+# ------------------------------------------------------------------ 채도 · 카메라 묶음
+_CAM_NAME = re.compile(r"^([A-Za-z])\d{3}_?[Cc]\d{3}")
+
+
+def camera_signature(shot: ShotIn) -> tuple:
+    """파일에서 읽을 수 있는 카메라 단서: 입력 색공간, 해상도, 코덱, 비트 수, 프레임레이트, 릴 이름의 카메라 글자."""
+    a = shot.analysis or {}
+    src = a.get("source", {})
+    m = _CAM_NAME.match(shot.name or "")
+    return (a.get("space"), src.get("width"), src.get("height"), src.get("codec"), src.get("pix_fmt"),
+            src.get("bits"), round(float(src.get("fps") or 0)), m.group(1).upper() if m else None)
+
+
+def _match_sat(usable, res, stats, faces, gid_of, anchor, ref_id, opts: MatchOptions, info: dict) -> None:
+    """채도. 카메라(색 과학)마다 다른 채도 응답을 카메라 단위로 한 값으로 맞춘다.
+
+    재는 양: 같은 인물의 스킨 색도와 배경색(화면에서 가장 넓은 색) 색도 사이의 거리 (log2 색도 평면).
+    이 거리는 화이트밸런스 · 노출과 무관하고 채도에 비례한다. 컷과 기준의 비율이 필요한 채도 배수다.
+    한 컷의 값은 배경이 달라지면 흔들리므로 컷마다 따로 쓰지 않는다. 같은 카메라로 보이는 컷들의
+    중앙값 하나를 그 카메라의 모든 컷에 쓴다 (얼굴이 없는 컷에도 같은 값이 들어간다).
+
+    카메라 구분: 파일에서 읽히는 단서가 다르면 다른 카메라다. 단서가 전부 같으면(변환본, 메타데이터 없음)
+    채도 추정값 자체가 두 무리로 갈릴 때만 나눈다.
+    """
+    by_id = {s.id: s for s in usable}
+    if ref_id not in by_id:
+        return
+    ordered = sorted(usable, key=lambda s: s.order)
+
+    def delta(sid: str) -> dict:
+        st = stats[sid]
+        if "chroma_bg" not in st or st.get("bg_frac", 0.0) < opts.sat_min_bg:
+            return {}
+        bg = np.asarray(st["chroma_bg"], np.float64)
+        out = {}
+        for f, gid in zip(faces[sid], gid_of[sid]):
+            rgb = np.asarray(f["rgb"], np.float64)
+            if gid is not None and f["quality"] >= 0.3:
+                out[gid] = (np.array([np.log2(rgb[0] / rgb[1]), np.log2(rgb[2] / rgb[1])]) - bg, float(f["quality"]))
+        return out
+
+    d = {s.id: delta(s.id) for s in usable}
+    sig = {s.id: camera_signature(s) for s in usable}
+
+    def estimates(members: list[str]) -> dict[str, float]:
+        """members(같은 카메라로 보는 기준 쪽 컷들)를 기준 삼아, 다른 컷들의 채도 배수(log2)."""
+        tgt: dict[int, np.ndarray] = {}
+        for gid in {g for sid in members for g in d[sid]}:
+            if gid in d.get(ref_id, {}):
+                tgt[gid] = d[ref_id][gid][0]
+            else:
+                pts = [(d[sid][gid][0], d[sid][gid][1]) for sid in members if gid in d[sid]]
+                tgt[gid] = _wmedian([p for p, _ in pts], [q for _, q in pts])
+        out = {}
+        for s in usable:
+            vals, wts = [], []
+            for gid, (v, q) in d[s.id].items():
+                t = tgt.get(gid)
+                if t is None:
+                    continue
+                nv, nt = float(np.hypot(*v)), float(np.hypot(*t))
+                if nv < 0.08 or nt < 0.08 or float(v @ t) / (nv * nt) < 0.94:
+                    continue                          # 스킨이 배경색과 너무 가깝거나 방향이 다르다: 같은 배경이 아니다
+                vals.append(np.log2(float(t @ v) / float(v @ v)))
+                wts.append(q)
+            if vals:
+                out[s.id] = float(_wmedian(vals, wts)[0])
+        return out
+
+    # 1) 카메라 묶음
+    by = "meta"
+    groups: dict[object, list[str]] = {}
+    for s in ordered:
+        groups.setdefault(sig[s.id], []).append(s.id)
+    if len(groups) == 1:
+        by = "image"
+        est = estimates([ref_id])
+        vals = sorted((v, sid) for sid, v in est.items() if sid != ref_id)
+        other: list[str] = []
+        if len(vals) >= 2:
+            # 기준(0)에서 가장 멀리 떨어진 무리를 찾는다: 정렬한 값 사이의 가장 큰 틈
+            pts = sorted([(0.0, ref_id)] + vals)
+            gaps = [(pts[i + 1][0] - pts[i][0], i) for i in range(len(pts) - 1)]
+            gap, i = max(gaps)
+            lo, hi = [sid for _, sid in pts[: i + 1]], [sid for _, sid in pts[i + 1:]]
+            side = hi if ref_id in lo else lo
+            if gap >= opts.sat_split and len(side) >= 2:
+                other = side
+        groups = {"ref": [s.id for s in ordered if s.id not in other]}
+        if other:
+            groups["other"] = [sid for sid in (s.id for s in ordered) if sid in other]
+    ref_key = next(k for k, m in groups.items() if ref_id in m)
+    est = estimates(groups[ref_key])
+
+    # 2) 카메라별 채도
+    labels = iter("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    order = [ref_key] + [k for k in groups if k != ref_key]
+    cams = []
+    for key in order:
+        members = groups[key]
+        label = next(labels, "?")
+        if key == ref_key:
+            for sid in members:
+                r = res[sid]
+                r.cam = label
+                if r.method not in ("none", "excluded"):
+                    r.sat_method, r.sat_conf, r.sat_apply = "ref", "high", True
+            cams.append(dict(id=label, n=len(members), sat=1.0, ref=True, conf="high"))
+            continue
+        vals = [est[sid] for sid in members if sid in est and res[sid].method == "skin" and res[sid].exp_conf != "low"]
+        m, conf = 0.0, "low"
+        if vals:
+            m = float(np.median(vals))
+            spread = float(np.ptp(vals))
+            conf = "high" if (len(vals) >= 3 and spread <= 0.10) else "medium" if (len(vals) >= 2 and spread <= 0.15) else "low"
+            if abs(m) > opts.sat_limit:
+                m, conf = float(np.clip(m, -opts.sat_limit, opts.sat_limit)), "low"
+            if abs(m) < opts.sat_dead:
+                m = 0.0
+        sat = 2.0 ** m
+        for sid in members:
+            r = res[sid]
+            r.cam = label
+            if r.method in ("none", "excluded"):
+                continue
+            if not vals:
+                continue                              # 이 카메라에서 잴 수 있는 컷이 없다
+            r.sat, r.sat_method, r.sat_conf = sat, "camera", conf
+            r.sat_apply = conf != "low" and r.exp_apply
+            if m != 0.0:
+                # 채도는 중성축을 기준으로 색도를 sat 배 한다. 그 뒤에 스킨이 목표 색에 오려면
+                # 게인으로 맞춘 색도를 미리 1/sat 배 한 자리에 두어야 한다.
+                g = (2.0 ** r.exp) * np.asarray(r.wb, np.float64)
+                an = anchor.get(sid)
+                c = g * (an if an is not None else np.ones(3))
+                shift = np.array([np.log2(c[0] / c[1]), 0.0, np.log2(c[2] / c[1])]) * (1.0 / sat - 1.0)
+                k = 2.0 ** shift
+                r.sat_k = list(k * (_e(c) / max(_e(k * c), 1e-9)))
+        cams.append(dict(id=label, n=len(members), sat=round(sat, 3), ref=False, conf=conf if vals else "none"))
+    info["cameras"] = cams
+    info["cameras_by"] = by

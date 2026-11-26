@@ -80,6 +80,9 @@ DEFAULT_SETTINGS = {
     "apply_low": False,                # 신뢰도 낮은 자동값도 적용
     "wb_enabled": True,                # WB 매칭 사용
     "black_enabled": True,             # 블랙/헤이즈 매칭 사용 (Linear Gain 방식에서만)
+    "sat_enabled": True,               # 채도 매칭 사용 (MATCH 노드의 LUT)
+    "match_label": "MATCH",            # 채도 LUT 를 넣을 노드의 라벨
+    "density": 0.75,                   # 채도를 바꿀 때 진한 색의 밝기: 0 밝아짐(일반 채도), 0.75 유지, 1.25 · 2 진해짐
     "default_log": "slog3_sgamut3cine",
     "default_display": "rec709_g24",
     "follow_selection": True,          # 컷을 고르면 Resolve 재생헤드도 이동
@@ -89,6 +92,7 @@ EXP_STEP = 1.0 / 3.0          # 기본 버튼 한 번
 EXP_STEP_FINE = 0.1
 EXP_STEP_COARSE = 1.0
 WB_STEP = 0.04                # WB 버튼 한 번 (스톱 단위 채널 차이)
+SAT_STEP = 0.0703893          # 채도 버튼 한 번: log2(1.05) = 5%
 
 #: 그룹 색 (Resolve 클립 컬러 계열의 차분한 톤)
 GROUP_COLORS = ["#d98b4a", "#5fa8a0", "#b9a44c", "#8f7fc4", "#c96f7e", "#6f9fd1",

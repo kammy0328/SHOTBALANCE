@@ -31,13 +31,14 @@ def split_key(key: str) -> tuple[str, int, int]:
 
 
 def new_cut() -> dict:
-    return {"group": None, "intent": {"exp": 0.0, "temp": 0.0, "tint": 0.0}, "auto": None,
+    return {"group": None, "intent": new_intent(), "auto": None,
             "locked": False, "frozen": None, "excluded": False, "use_exp": None, "use_wb": None, "use_black": None,
-            "space": None}
+            "use_sat": None, "space": None}
 
 
 def new_intent() -> dict:
-    return {"exp": 0.0, "temp": 0.0, "tint": 0.0}
+    """exp: 스톱, temp · tint: 버튼 횟수, sat: log2 배수."""
+    return {"exp": 0.0, "temp": 0.0, "tint": 0.0, "sat": 0.0}
 
 
 def _slug(s: str) -> str:
@@ -76,6 +77,9 @@ class ProjectStore:
                     for c in d.get("cuts", {}).values():
                         for k, v in new_cut().items():
                             c.setdefault(k, copy.deepcopy(v))
+                        c["intent"] = {**new_intent(), **c["intent"]}
+                    for g in d.get("groups", {}).values():
+                        g["intent"] = {**new_intent(), **g.get("intent", {})}
                     self.data.update(d)
         except Exception:  # noqa: BLE001  손상된 파일은 옆에 남겨 두고 새로 시작
             try:

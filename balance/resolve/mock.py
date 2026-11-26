@@ -23,8 +23,23 @@ def shot_for(path: str) -> Shot | None:
 
 
 class MockGraph:
+    #: 진짜 Resolve 처럼, 목록을 새로 읽은 뒤에 알게 된 LUT 만 받는다 (None 이면 검사하지 않는다)
+    known_luts: set | None = None
+
     def __init__(self, labels):
         self.labels = labels
+        self.luts: dict[int, str] = {}
+
+    def SetLUT(self, i, path):
+        if not 1 <= i <= len(self.labels):
+            return False
+        if path and MockGraph.known_luts is not None and path not in MockGraph.known_luts:
+            return False
+        self.luts[i] = path
+        return True
+
+    def GetLUT(self, i):
+        return self.luts.get(i, "")
 
     def GetNumNodes(self):
         return len(self.labels)
@@ -149,9 +164,18 @@ class MockTimeline:
 
 
 class MockProject:
-    def __init__(self, name, timeline, settings, others=()):
+    def __init__(self, name, timeline, settings, others=(), lut_root=None):
         self.name, self.timeline, self.settings = name, timeline, settings
         self.timelines = [timeline, *others]
+        self.lut_root = lut_root
+        MockGraph.known_luts = set() if lut_root is not None else None
+
+    def RefreshLUTList(self):
+        if self.lut_root is not None:
+            import os
+            MockGraph.known_luts = {os.path.relpath(os.path.join(d, f), self.lut_root).replace("\\", "/")
+                                    for d, _, fs in os.walk(self.lut_root) for f in fs if f.endswith(".cube")}
+        return True
 
     def GetTimelineCount(self):
         return len(self.timelines)
@@ -203,21 +227,25 @@ class MockResolve:
         return _PM(self.project)
 
 
-def demo_resolve() -> MockResolve:
-    """28컷짜리 데모 타임라인. 한 컷은 일부러 EXPOSURE 노드 없이 둔다."""
+def demo_resolve(lut_root=None) -> MockResolve:
+    """28컷짜리 데모 타임라인. 한 컷은 일부러 EXPOSURE 노드 없이, 한 컷은 MATCH 노드 없이 둔다."""
     groups: dict[str, MockColorGroup] = {}
     items = []
     pos = 86400
     for n, k in enumerate(EDIT_ORDER):
         shot, gname, _isref, dur = DEMO[k]
         grp = groups.setdefault(gname, MockColorGroup(gname)) if gname else None
-        labels = ["EXPOSURE", "BALANCE", "LOOK"] if shot.name != "A007C006_241105_R1AB" else ["BALANCE", "LOOK"]
+        labels = ["EXPOSURE", "MATCH", "LOOK"]
+        if shot.name == "A007C006_241105_R1AB":
+            labels = ["MATCH", "LOOK"]
+        elif shot.name == "C001C002_241104_A35X":
+            labels = ["EXPOSURE", "LOOK"]
         items.append(MockTimelineItem(f"ti-{n + 1:03d}", shot, pos, dur, 10, grp, labels))
         pos += dur
     tl = MockTimeline("MV_Edit_v07_color", items)
     prj = MockProject("데모 프로젝트", tl, {
         "colorScienceMode": "davinciYRGBColorManagedv2", "colorSpaceTimeline": "DaVinci WG/Intermediate",
-        "timelineFrameRate": "24"}, others=[_teaser()])
+        "timelineFrameRate": "24"}, others=[_teaser()], lut_root=lut_root)
     return MockResolve(prj)
 
 
@@ -228,7 +256,7 @@ def _teaser() -> MockTimeline:
     for n, (k, src_in, dur) in enumerate(plan):
         shot, _g, _r, full = DEMO[k]
         dur = dur or full
-        labels = ["EXPOSURE", "LOOK"] if n != 5 else ["LOOK"]
+        labels = ["EXPOSURE", "MATCH", "LOOK"] if n != 5 else ["LOOK"]
         items.append(MockTimelineItem(f"tz-{n + 1:03d}", shot, pos, dur, src_in, None, labels))
         pos += dur
     return MockTimeline("MV_Teaser_v03", items)

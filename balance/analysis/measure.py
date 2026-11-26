@@ -99,6 +99,45 @@ def frame_stats(lin: np.ndarray, code: np.ndarray) -> dict:
     return out
 
 
+def background_chroma(lin: np.ndarray, clipped: np.ndarray | None, boxes: list) -> tuple[list, float] | None:
+    """화면에서 가장 넓은 색(배경)의 색도 [log2(R/G), log2(B/G)] 와, 그 색이 차지하는 비율.
+
+    색도 분포의 최빈값을 쓴다. 최빈값은 화이트밸런스가 틀어지면 그만큼 같이 움직이고 채도가 바뀌면
+    같은 비율로 늘거나 줄기 때문에, 스킨 색도와의 차이를 재면 WB 와 무관하게 채도만 비교할 수 있다.
+    얼굴 영역(boxes: x, y, w, h 픽셀)은 스킨이 최빈값이 되지 않도록 뺀다."""
+    h, w = lin.shape[:2]
+    e = weighted(lin, EXPOSURE_W)
+    ok = (e > 0.02) & (lin.min(axis=-1) > 1e-4)
+    if clipped is not None:
+        ok &= ~clipped
+    for x, y, bw, bh in boxes:
+        x0, x1 = int(max(0, x - 0.25 * bw)), int(min(w, x + 1.25 * bw))
+        y0, y1 = int(max(0, y - 0.35 * bh)), int(min(h, y + 1.45 * bh))
+        ok[y0:y1, x0:x1] = False
+    if ok.sum() < 0.02 * h * w:
+        return None
+    px = lin[ok]
+    lr = np.log2(px[:, 0] / px[:, 1])
+    lb = np.log2(px[:, 2] / px[:, 1])
+    step, lim = 0.04, 2.4
+    n = int(2 * lim / step)
+    hist, _, _ = np.histogram2d(np.clip(lr, -lim, lim - 1e-6), np.clip(lb, -lim, lim - 1e-6), bins=n, range=[[-lim, lim], [-lim, lim]])
+    sm = hist.copy()                                      # 3×3 평활
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx or dy:
+                sm += np.roll(np.roll(hist, dx, axis=0), dy, axis=1)
+    i, j = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    c = np.array([-lim + (i + 0.5) * step, -lim + (j + 0.5) * step])
+    for _ in range(3):                                    # 최빈값 주변 평균으로 다듬는다
+        near = (lr - c[0]) ** 2 + (lb - c[1]) ** 2 < 0.08 ** 2
+        if near.sum() < 16:
+            break
+        c = np.array([float(lr[near].mean()), float(lb[near].mean())])
+    near = (lr - c[0]) ** 2 + (lb - c[1]) ** 2 < 0.08 ** 2
+    return [float(c[0]), float(c[1])], float(near.sum() / (h * w))
+
+
 def signal_stats(code: np.ndarray) -> dict:
     """코드값 신호 통계 (입력 색공간 추정용). 선형화 전의 값으로 계산한다."""
     luma = weighted(code, _LUMA)

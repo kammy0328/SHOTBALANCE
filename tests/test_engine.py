@@ -78,6 +78,8 @@ def test_analyze_matches_and_writes_cdl(eng):
         assert c["analyzed"] or c["excluded"]
         if c["excluded"] or c["auto"]["method"] != "skin" or shot.tagged:
             continue
+        if shot.cam_sat != 1.0 and not c["total"]["use_sat"]:
+            continue                      # 채도 응답이 다른 카메라인데 채도를 아직 적용하지 않은 컷 (제안 상태)
         slope = slope_of(eng, c["id"])
         assert slope is not None, c["name"]
         want = truth_gain(shot, truth_ref[gname])
@@ -152,6 +154,53 @@ def test_black_haze_matching(eng):
     eng.set_settings(apply_mode="linear_gain")
     settle(eng)
     assert np.abs(offset_of(eng, c["id"]) - truth_black(shots[c["name"]][0], truth_ref["스튜디오"])).max() < 0.0015
+    eng.undo_stack.clear()
+
+
+def lut_of(eng, cut_id):
+    return eng.session._items[cut_id].graph.luts.get(2, "")       # 데모 노드 구성: EXPOSURE, MATCH, LOOK
+
+
+def test_saturation_lut(eng):
+    """카메라 단위 채도: 값마다 하나씩 만든 LUT 파일을 MATCH 노드에 건다."""
+    s = eng.state()
+    studio = next(g for g in s["groups"] if g["name"] == "스튜디오")
+    assert [(c["id"], c["n"], c["ref"]) for c in studio["cameras"]] == [("A", 8, True), ("B", 2, False)]
+    for name in ("B002C004", "B002C009"):
+        c = by_name(s, name)
+        assert c["auto"]["cam"] == "B" and abs(c["auto"]["sat"] - 1 / 0.86) < 0.03 and c["total"]["use_sat"]
+        assert lut_of(eng, c["id"]) == "ShotBalance/SB_sat116_den075.cube"
+    assert (eng.lut_root / "ShotBalance" / "SB_sat116_den075.cube").is_file()
+    a = by_name(s, "A001C009")
+    assert a["auto"]["cam"] == "A" and a["total"]["sat"] == 1.0 and lut_of(eng, a["id"]) == ""
+    # 컷이 하나뿐인 카메라: 제안만 한다. 이 컷은 MATCH 노드도 없다
+    c = by_name(s, "C001C002")
+    assert c["auto"]["sat_method"] == "camera" and not c["total"]["use_sat"] and not c["match_node"]
+    # 채도 의도 버튼: 그룹 전체 +5%
+    eng.intent("group", gid=studio["id"], sat=config.SAT_STEP)
+    settle(eng)
+    s2 = eng.state()
+    assert abs(by_name(s2, "A001C009")["total"]["sat"] - 1.05) < 1e-3 and lut_of(eng, a["id"]) == "ShotBalance/SB_sat105_den075.cube"
+    b = by_name(s2, "B002C004")
+    assert abs(b["total"]["sat"] - b["auto"]["sat"] * 1.05) < 1e-3 and lut_of(eng, b["id"]) == "ShotBalance/SB_sat122_den075.cube"
+    assert not any(c["pending"] or c["write_failed"] for c in s2["cuts"])
+    eng.intent("group", gid=studio["id"], sat=-config.SAT_STEP)
+    settle(eng)
+    assert lut_of(eng, a["id"]) == ""                                # 1 로 돌아오면 LUT 를 뗀다
+    # 자동 채도를 끄면 게인도 채도 없이 맞춘 값으로 돌아간다
+    eng.set_cut([b["key"]], use_sat=False)
+    settle(eng)
+    off = by_name(eng.state(), "B002C004")
+    assert off["total"]["sat"] == 1.0 and lut_of(eng, b["id"]) == ""
+    assert np.allclose(off["total"]["slope"], np.array(off["total"]["wb"]) * 2.0 ** off["total"]["exp"] * np.array(off["auto"]["black_k"]), rtol=1e-4)
+    eng.set_cut([b["key"]], use_sat=None)
+    # 밀도 설정을 바꾸면 다른 파일을 건다
+    eng.set_settings(density=1.25)
+    settle(eng)
+    assert lut_of(eng, b["id"]) == "ShotBalance/SB_sat116_den125.cube"
+    eng.set_settings(density=0.75)
+    settle(eng)
+    assert lut_of(eng, b["id"]) == "ShotBalance/SB_sat116_den075.cube"
     eng.undo_stack.clear()
 
 

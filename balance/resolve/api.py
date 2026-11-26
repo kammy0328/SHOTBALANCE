@@ -103,6 +103,7 @@ class ResolveSession:
     def __init__(self, resolve):
         self.resolve = resolve
         self._items: dict[str, object] = {}
+        self.match_label = "MATCH"
         self._timeline = None
         self._fps = 24.0
         self._drop = False
@@ -163,6 +164,7 @@ class ResolveSession:
     def _scan(self, tl, node_label: str, fps: float) -> tuple[list[dict], dict]:
         d = {"fps": fps}
         want = node_label.strip().lower()
+        want_match = self.match_label.strip().lower()
         items: dict[str, object] = {}
         found = []
         for t in range(1, int(_call(tl, "GetTrackCount", "video", default=0) or 0) + 1):
@@ -197,6 +199,7 @@ class ResolveSession:
                 uid = str(_call(item, "GetUniqueId", default="") or f"v{t}:{start}")
                 labels = self._node_labels(item)
                 node = next((i + 1 for i, lb in enumerate(labels) if lb.strip().lower() == want), None)
+                match = next((i + 1 for i, lb in enumerate(labels) if lb.strip().lower() == want_match), None)
                 group = _call(item, "GetColorGroup", default=None)
                 try:
                     cfps = float(str(props.get("FPS", "")).split()[0])
@@ -211,7 +214,7 @@ class ResolveSession:
                     data_level=str(props.get("Data Level", "") or "") or None,
                     clip_color=str(_call(item, "GetClipColor", default="") or "") or None,
                     resolve_group=str(_call(group, "GetName", default="")) or None if group else None,
-                    node_index=node, node_count=len(labels)))
+                    node_index=node, match_index=match, node_count=len(labels)))
         found.sort(key=lambda c: (c["start"], c["track"]))
         for i, c in enumerate(found, 1):
             c["index"] = i
@@ -271,6 +274,29 @@ class ResolveSession:
                "Offset": " ".join(f"{float(v):.6f}" for v in offset),
                "Power": "1.0 1.0 1.0", "Saturation": "1.0"}
         return bool(_call(item, "SetCDL", cdl, default=False))
+
+    def write_lut(self, cut_id: str, node_label: str, rel_path: str, item=None) -> bool:
+        """라벨이 node_label 인 노드에 LUT 를 건다. rel_path 는 Resolve LUT 폴더 기준 경로, 빈 문자열이면 LUT 를 뗀다.
+        SetLUT 의 반환값만으로는 실제로 걸렸는지 알 수 없어 GetLUT 으로 다시 읽어 확인한다."""
+        item = item if item is not None else self._items.get(cut_id)
+        if item is None:
+            return False
+        want = node_label.strip().lower()
+        index = next((i + 1 for i, lb in enumerate(self._node_labels(item)) if lb.strip().lower() == want), None)
+        if index is None:
+            return False
+        graph = _call(item, "GetNodeGraph", default=None)
+        target = graph if graph and hasattr(graph, "SetLUT") else item
+        ok = bool(_call(target, "SetLUT", index, rel_path, default=False))
+        got = _call(target, "GetLUT", index, default=None)
+        if isinstance(got, str):
+            norm = lambda s: s.replace("\\", "/").strip("/").lower()          # noqa: E731
+            return norm(got) == norm(rel_path) or (bool(rel_path) and norm(got).endswith(norm(rel_path)))
+        return ok
+
+    def refresh_luts(self) -> bool:
+        """새로 만든 LUT 파일을 Resolve 가 찾도록 목록을 다시 읽게 한다."""
+        return bool(_call(self._project(), "RefreshLUTList", default=False))
 
     def goto(self, cut_id: str, at_start: bool = False) -> bool:
         item = self._items.get(cut_id)
