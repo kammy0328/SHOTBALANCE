@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         server = AppServer(lambda notify: Engine(notify), port=args.port)
     except Exception:  # noqa: BLE001
         import traceback
-        _fatal("Balance 를 시작하지 못했습니다.\n\n" + traceback.format_exc())
+        _fatal("ShotBalance 를 시작하지 못했습니다.\n\n" + traceback.format_exc())
         return 1
 
     server.start()

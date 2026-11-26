@@ -26,7 +26,7 @@ def main() -> None:
     (out / "css" / "app.css").write_text(css, encoding="utf-8")
     html = (out / "index.html").read_text(encoding="utf-8")
     html = html.replace('<link rel="stylesheet" href="css/app.css">', FONTS + '\n<link rel="stylesheet" href="css/app.css">')
-    html = html.replace("<title>Balance</title>", "<title>Balance UI 미리보기</title>")
+    html = html.replace("<title>ShotBalance</title>", "<title>ShotBalance UI 미리보기</title>")
     (out / "index.html").write_text(html, encoding="utf-8")
     files = [p for p in out.rglob("*") if p.is_file()]
     print(f"{out}: {len(files)} files, {sum(p.stat().st_size for p in files) / 1024:.0f} KB")

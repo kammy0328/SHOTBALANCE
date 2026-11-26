@@ -21,7 +21,7 @@ a = Analysis(
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas, [],
-    name="Balance",
+    name="ShotBalance",
     console=False,
     icon=os.path.join(ROOT, "packaging", "balance.ico") if sys.platform == "win32" else None,
     upx=False,

@@ -1,5 +1,5 @@
 @echo off
-rem Builds dist\Balance.exe (single file, no Python needed on the target PC).
+rem Builds dist\ShotBalance.exe (single file, no Python needed on the target PC).
 setlocal
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" tools\get_models.py || goto :fail
 ".venv\Scripts\python.exe" -m PyInstaller packaging\balance.spec --noconfirm --clean --distpath dist --workpath build || goto :fail
 echo.
-echo Done: dist\Balance.exe
+echo Done: dist\ShotBalance.exe
 pause
 exit /b 0
 :fail

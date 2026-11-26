@@ -2,6 +2,7 @@ name: build
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -23,10 +24,10 @@ jobs:
         run: python -m PyInstaller packaging/balance.spec --noconfirm --clean
       - uses: actions/upload-artifact@v4
         with:
-          name: Balance-windows
-          path: dist/Balance.exe
+          name: ShotBalance-windows
+          path: dist/ShotBalance.exe
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Balance.exe
+          files: dist/ShotBalance.exe

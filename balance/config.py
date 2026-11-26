@@ -23,16 +23,31 @@ def web_dir() -> Path:
     return resource_dir() / "web" if _frozen() else Path(__file__).resolve().parent / "web"
 
 
+_LEGACY_NAME = "Balance"      # 0.1 이 쓰던 폴더 이름
+
+
+def _app_dir(root: Path) -> Path:
+    """root 아래의 앱 폴더. 0.1 의 폴더만 있으면 이름을 바꿔 그대로 이어 쓴다."""
+    p = root / APP_NAME
+    old = root / _LEGACY_NAME
+    if not p.exists() and old.is_dir():
+        try:
+            old.rename(p)
+        except OSError:
+            pass
+    return p
+
+
 def data_dir() -> Path:
     env = os.environ.get("BALANCE_DATA_DIR")
     if env:
         p = Path(env)
     elif sys.platform == "win32":
-        p = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
+        p = _app_dir(Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")))
     elif sys.platform == "darwin":
-        p = Path.home() / "Library" / "Application Support" / APP_NAME
+        p = _app_dir(Path.home() / "Library" / "Application Support")
     else:
-        p = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME
+        p = _app_dir(Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")))
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -42,11 +57,11 @@ def cache_dir() -> Path:
     if env:
         p = Path(env) / "cache"
     elif sys.platform == "win32":
-        p = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "cache"
+        p = _app_dir(Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))) / "cache"
     elif sys.platform == "darwin":
-        p = Path.home() / "Library" / "Caches" / APP_NAME
+        p = _app_dir(Path.home() / "Library" / "Caches")
     else:
-        p = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / APP_NAME
+        p = _app_dir(Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")))
     p.mkdir(parents=True, exist_ok=True)
     return p
 

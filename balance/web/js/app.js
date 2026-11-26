@@ -195,6 +195,9 @@ function renderEmpty() {
     if (!st.models.detector || !st.models.recognizer) {
       rows.push(`${icon("i-target")}<span><b>얼굴 인식 모델</b>이 없습니다. 지금은 스킨 대신 밝기 분포로만 맞춥니다.</span><button data-do="models">모델 내려받기</button>`);
     }
+    if (c.dwg === false && !c.aces && st.settings.apply_mode === "linear_gain") {
+      rows.push(`${icon("i-warn")}<span>타임라인 색공간이 <b>${F.esc(c.timeline_space || "알 수 없음")}</b> 입니다. <b>DaVinci WG/Intermediate</b> 가 아니면 Gamma=Linear 노드의 Gain 이 실제 노출과 달라집니다. 프로젝트 설정 &gt; 컬러 매니지먼트에서 바꿔 주세요.</span>`);
+    }
     const nonode = st.cuts.filter((x) => !x.node).length;
     if (nonode > 0) {
       rows.push(`${icon("i-unlink")}<span><b>${F.esc(st.settings.node_label)}</b> 노드가 없는 컷이 ${nonode}개 있습니다. 값은 계산하지만 Resolve 에는 쓸 수 없습니다.</span><button data-do="node-guide">노드 만드는 방법</button>`);
@@ -723,8 +726,9 @@ function nodeGuidePop() {
     <li>컬러 페이지에서 입력 변환(CST 또는 컬러 매니지먼트) <b>바로 다음</b>에 노드를 하나 만듭니다.</li>
     <li>노드 라벨을 <b>${lab}</b> 로 바꿉니다.</li>
     <li>노드를 우클릭해 <b>Gamma 를 Linear</b> 로 바꿉니다. (설정에서 Offset 방식을 쓰면 건너뜁니다)</li>
+    <li>프라이머리 팔레트에서 이 노드의 <b>Lum Mix 를 0</b> 으로 둡니다. 0 이 아니면 채널별 게인이 계산한 값 그대로 들어가지 않습니다.</li>
     <li>이 노드 구성을 나머지 컷에 복사하고, 위의 <b>타임라인 다시 읽기</b>를 누릅니다.</li>
-  </ol><div class="pop-foot" style="padding:10px 0 0">이 노드는 Balance 전용으로 두세요. 값을 쓸 때마다 노드의 프라이머리를 덮어씁니다.</div>`);
+  </ol><div class="pop-foot" style="padding:10px 0 0">프로젝트의 타임라인 색공간은 DaVinci WG/Intermediate 여야 합니다. 이 노드는 ShotBalance 전용으로 두세요. 값을 쓸 때마다 노드의 프라이머리를 덮어씁니다.</div>`);
 }
 
 /* ────────────────────────────────────────────────────── 이벤트 연결 */
