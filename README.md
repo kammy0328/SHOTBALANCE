@@ -115,7 +115,7 @@ R3D, BRAW, ARRIRAW, X-OCN, Cinema RAW Light 는 직접 읽지 못합니다. Reso
 - HTTP 서버와 보호 장치, UI 시나리오(헤드리스 브라우저)
 - Windows 에서의 exe 빌드
 
-0.1 은 Windows 에서 분석 도중 죽는 문제가 있었습니다. 분석 스레드 여러 개가 동시에 행렬곱(BLAS)을 부를 때 나는 access violation 이었고, Windows CI 에서 발견해 0.2 에서 고쳤습니다. 0.1 을 받아 두셨다면 0.2 를 쓰세요.
+0.1 은 Windows 에서 분석 도중 죽을 수 있습니다. GitHub 의 Windows 빌드에서 access violation 으로 재현됐고, 죽은 지점은 분석 스레드 여러 개가 동시에 행렬곱(BLAS)을 부르는 곳이었습니다. 0.2 에서 그 연산을 채널별 계산으로 바꾸고 BLAS 스레드를 하나로 고정한 뒤로는 재현되지 않습니다. 0.1 을 받아 두셨다면 0.2 를 쓰세요.
 
 실제 Resolve 와 실제 촬영본이 있어야 확인할 수 있어서 아직 못 한 것. 첫 실행 때 먼저 봐 주세요.
 
