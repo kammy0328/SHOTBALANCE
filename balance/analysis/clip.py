@@ -10,7 +10,7 @@ from . import encoding, measure, temporal
 from .faces import FaceEngine, similarity
 
 #: 측정 방식이 바뀌면 올린다. 캐시된 분석 결과가 무효가 된다.
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 
 STAT_SIDE = 480        # 통계용 프레임 긴 변
 FACE_SIDE = 1280       # 얼굴·스킨 측정용 프레임 긴 변
@@ -71,7 +71,8 @@ def _box_iou(a, b) -> float:
 def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                  resolve_space: Callable[[dict], str], engine: FaceEngine | None = None,
                  name: str = "", cancel: Callable[[], bool] | None = None) -> dict:
-    """측정 결과(dict, JSON 으로 저장 가능)와 썸네일 JPEG 바이트를 돌려준다.
+    """측정 결과(dict, JSON 으로 저장 가능)와 썸네일 JPEG 들을 돌려준다.
+    썸네일: {"": 대표 프레임, "h": 컷의 첫 프레임, "t": 컷의 끝 프레임}
 
     open_source()            → VideoSource 또는 같은 인터페이스의 객체
     resolve_space(추정결과)  → 이 컷에 쓸 입력 색공간 id
@@ -128,11 +129,27 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
         # 3) 썸네일: 컷 가운데에 가장 가까운 대표 프레임, 대표 레벨로 보정
         mid = (src_in + src_out) // 2
         ti = min(rep, key=lambda i: abs(i - mid))
-        thumb = preview.thumb_jpeg(lins[ti] * np.float32(2.0 ** offs[ti]))
+        thumbs = {"": preview.thumb_jpeg(lins[ti] * np.float32(2.0 ** offs[ti]))}
+
+        # 3-1) 컷의 첫 프레임과 끝 프레임 (경계 리뷰용). 찍힌 그대로 둔다: 대표 레벨로 옮기지 않는다
+        edges = {}
+        for tag, idx in (("h", src_in), ("t", max(src_in, src_out - 1))):
+            check()
+            if idx in codes:
+                code_e = codes[idx]
+            elif tag == "t" and fast:
+                _, code_e = src.read_fast(idx, src_in, STAT_SIDE)      # 롱GOP 는 끝에 가장 가까운 키프레임
+            else:
+                code_e = src.read(idx, STAT_SIDE)
+            lin_e = spaces.to_dwg_linear(code_e, space)
+            thumbs[tag] = preview.thumb_jpeg(lin_e)
+            edges[tag] = round(float(measure.frame_stats(lin_e, code_e)["level"] - tmp["rep"]), 3)
         del codes
 
         # 4) 얼굴 · 스킨
         obs: list[dict] = []
+        floors: list[tuple[list, float]] = []
+        bgs: list[tuple[list, float]] = []
         detector = "none"
         for i in rep:
             check()
@@ -140,10 +157,16 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
             lin_hi = spaces.to_dwg_linear(code_hi, space)
             clipped, _ = measure.clip_mask(code_hi)
             h, w = lin_hi.shape[:2]
+            # 블랙 플로어는 해상도가 높을수록 작은 그늘까지 잡힌다 (와이드 샷에서 덜 뜬다)
+            rows, cols = measure.content_slice(code_hi)
+            fl, sp = measure.floor_stats(lin_hi[rows, cols])
+            floors.append(([v * float(2.0 ** offs[i]) for v in fl], sp * float(2.0 ** offs[i])))
             hints = src.face_hints(i, (h, w))
             gain = np.float32(2.0 ** offs[i])
+            boxes: list = []
             if hints is not None:
                 detector = "hint"
+                boxes = [f["box"] for f in hints[:MAX_FACES]]
                 for f in hints[:MAX_FACES]:
                     sk = measure.sample_skin(lin_hi, f["lm"], clipped, f.get("score", 0.99))
                     if sk is None:
@@ -155,6 +178,7 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                 detector = "yunet"
                 bgr = preview.detector_image(lin_hi)
                 dets = sorted(engine.detect(bgr), key=lambda d: -(d["box"][2] * d["box"][3] * d["score"]))[:MAX_FACES]
+                boxes = [d["box"] for d in dets]
                 for d in dets:
                     sk = measure.sample_skin(lin_hi, d["lm"], clipped, d["score"])
                     if sk is None or sk["quality"] < 0.12:
@@ -163,16 +187,26 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                     obs.append(dict(rgb=[v * float(gain) for v in sk["rgb"]], quality=sk["quality"], n=sk["n"],
                                     clip=sk["clip"], ident=None, emb=emb, size=sk["iod"] / w,
                                     box=[d["box"][0] / w, d["box"][1] / h, d["box"][2] / w, d["box"][3] / h]))
+            bg = measure.background_chroma(lin_hi[rows, cols], clipped[rows, cols],
+                                           [(b[0] - cols.start, b[1] - rows.start, b[2], b[3]) for b in boxes])
+            if bg is not None:
+                bgs.append(bg)
         faces = _cluster(obs)
+        if bgs:
+            merged["chroma_bg"] = [float(np.median([b[0][c] for b in bgs])) for c in range(2)]
+            merged["bg_frac"] = float(np.median([b[1] for b in bgs]))
+        if floors:
+            merged["black"] = [float(np.median([f[0][c] for f in floors])) for c in range(3)]
+            merged["black_spread"] = float(np.median([f[1] for f in floors]))
 
         info = src.info
         return dict(
             version=ANALYSIS_VERSION, space=space, guess=g, signal=sig,
             temporal=dict(kind=tmp["kind"], spread=tmp["spread"], rep=round(tmp["rep"], 4)),
-            stats=merged, faces=faces, detector=detector, frames=len(order),
+            stats=merged, faces=faces, detector=detector, frames=len(order), edges=edges,
             source=dict(codec=info.codec, pix_fmt=info.pix_fmt, bits=info.bits, width=info.width,
                         height=info.height, fps=round(info.fps, 3), range=info.range_flag,
                         matrix=info.matrix_flag, n_frames=n_total),
-        ), thumb
+        ), thumbs
     finally:
         src.close()

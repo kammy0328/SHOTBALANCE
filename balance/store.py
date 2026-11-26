@@ -31,12 +31,14 @@ def split_key(key: str) -> tuple[str, int, int]:
 
 
 def new_cut() -> dict:
-    return {"group": None, "intent": {"exp": 0.0, "temp": 0.0, "tint": 0.0}, "auto": None,
-            "locked": False, "frozen": None, "excluded": False, "use_exp": None, "use_wb": None, "space": None}
+    return {"group": None, "intent": new_intent(), "auto": None,
+            "locked": False, "frozen": None, "excluded": False, "use_exp": None, "use_wb": None, "use_black": None,
+            "use_sat": None, "space": None}
 
 
 def new_intent() -> dict:
-    return {"exp": 0.0, "temp": 0.0, "tint": 0.0}
+    """exp: 스톱, temp · tint: 버튼 횟수, sat: log2 배수."""
+    return {"exp": 0.0, "temp": 0.0, "tint": 0.0, "sat": 0.0}
 
 
 def _slug(s: str) -> str:
@@ -75,6 +77,9 @@ class ProjectStore:
                     for c in d.get("cuts", {}).values():
                         for k, v in new_cut().items():
                             c.setdefault(k, copy.deepcopy(v))
+                        c["intent"] = {**new_intent(), **c["intent"]}
+                    for g in d.get("groups", {}).values():
+                        g["intent"] = {**new_intent(), **g.get("intent", {})}
                     self.data.update(d)
         except Exception:  # noqa: BLE001  손상된 파일은 옆에 남겨 두고 새로 시작
             try:
@@ -124,19 +129,27 @@ class ProjectStore:
             self.touch()
         return c
 
-    def _inherit(self, key: str) -> dict | None:
+    def find(self, key: str) -> str | None:
+        """같은 소스 구간을 가리키는 저장된 키 (읽기 전용). 정확히 같은 키가 없으면,
+        같은 파일에서 이 구간의 절반 이상이 겹치는 키 가운데 가장 많이 겹치는 것."""
+        if key in self.cuts:
+            return key
         name, a, b = split_key(key)
         best, best_ov = None, 0.0
-        for k, c in self.cuts.items():
+        for k in self.cuts:
             n2, a2, b2 = split_key(k)
             if n2 != name:
                 continue
             ov = max(0, min(b, b2) - max(a, a2)) / max(1, b - a)
             if ov > best_ov:
-                best, best_ov = c, ov
-        if best is None or best_ov < 0.5:
+                best, best_ov = k, ov
+        return best if best_ov >= 0.5 else None
+
+    def _inherit(self, key: str) -> dict | None:
+        best = self.find(key)
+        if best is None:
             return None
-        c = copy.deepcopy(best)
+        c = copy.deepcopy(self.cuts[best])
         c["auto"] = None          # 구간이 달라졌으니 측정은 다시 한다
         return c
 

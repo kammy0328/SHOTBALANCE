@@ -56,6 +56,14 @@
     <div class="sheet-head">
       <h1 class="sheet-title"><span id="sheet-title">전체</span> <span class="sheet-count" id="sheet-count"></span></h1>
       <div class="sheet-tools">
+        <div class="seg" id="seg-sort" role="group" aria-label="경계 정렬" hidden>
+          <button data-v="time" class="is-on" title="타임라인 순서">순서대로</button>
+          <button data-v="risk" title="한쪽이 제안값이거나 신뢰도가 낮은 경계부터">확인할 곳부터</button>
+        </div>
+        <div class="seg" id="seg-view" role="group" aria-label="보기">
+          <button data-v="cut" class="is-on" title="컷 보기">컷</button>
+          <button data-v="edge" title="컷이 바뀌는 지점의 앞뒤 프레임을 나란히 봅니다 (B)">경계</button>
+        </div>
         <div class="seg" id="seg-compare" role="group" aria-label="미리보기">
           <button data-v="after" class="is-on" title="보정 후 미리보기">보정 후</button>
           <button data-v="before" title="촬영본 그대로 (\ 누르고 있기)">촬영본</button>
@@ -69,6 +77,7 @@
     </div>
     <div class="notice" id="notice" hidden></div>
     <div class="grid" id="grid" data-size="m"></div>
+    <div class="bgrid" id="bgrid" data-size="m" hidden></div>
     <div class="empty" id="empty" hidden></div>
   </main>
 
@@ -118,6 +127,13 @@
           <button class="switch" id="sw-auto" role="switch" aria-checked="true" aria-label="자동 매칭값 사용"><i></i></button>
           <div class="layer-note" id="auto-note"></div>
         </div>
+        <div class="layer" id="layer-black">
+          <span class="layer-name">블랙</span>
+          <span class="layer-bar"><i></i></span>
+          <span class="layer-val num" id="lv-black">0</span>
+          <button class="switch" id="sw-black" role="switch" aria-checked="true" aria-label="블랙 맞춤 사용"><i></i></button>
+          <div class="layer-note" id="black-note"></div>
+        </div>
         <div class="layer" id="layer-group">
           <span class="layer-name">그룹 의도</span>
           <span class="layer-bar"><i></i></span>
@@ -145,6 +161,19 @@
           <button class="wb-btn wb-m" data-tint="1" title="마젠타 쪽으로"><i></i>마젠타</button>
         </div>
         <div class="wb-note" id="wb-note"></div>
+      </section>
+
+      <section class="m-sat" id="m-sat">
+        <div class="m-sub">
+          <span>채도</span>
+          <span class="sat-val num" id="sat-val">100%</span>
+          <button class="switch" id="sw-sat" role="switch" aria-checked="true" aria-label="자동 채도 사용"><i></i></button>
+        </div>
+        <div class="steps steps-sm">
+          <button class="step" id="sat-down" title="채도 낮추기 ( [ )"><svg><use href="#i-minus"/></svg><span>낮추기</span></button>
+          <button class="step" id="sat-up" title="채도 올리기 ( ] )"><svg><use href="#i-plus"/></svg><span>올리기</span></button>
+        </div>
+        <div class="wb-note" id="sat-note"></div>
       </section>
 
       <section class="m-actions" id="m-actions">
@@ -207,6 +236,7 @@
     <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2.2 14.3 13H1.7z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 6.4v3.2M8 11.3h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
     <symbol id="i-ring" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
     <symbol id="i-unlink" viewBox="0 0 16 16"><rect x="2.5" y="4.5" width="11" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M0.8 8h1.7M13.5 8h1.7M4.2 13.6 11.8 2.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 16 16"><path d="M8 2.2 14 5.4 8 8.6 2 5.4zM2.6 8.4 8 11.3l5.4-2.9M2.6 11 8 13.9l5.4-2.9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></symbol>
     <symbol id="i-more" viewBox="0 0 16 16"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
     <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
     <symbol id="i-file" viewBox="0 0 16 16"><path d="M4 1.8h5l3 3v9.4H4zM9 1.8v3h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="m6 8.5 4 4M10 8.5l-4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>

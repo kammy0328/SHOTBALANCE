@@ -7,7 +7,7 @@ import pytest
 from balance import config
 from balance.core import Engine, cdl_values, wb_from_intent
 from balance.media.demo_shots import DEMO
-from balance.media.synthetic import truth_gain
+from balance.media.synthetic import truth_black, truth_gain
 from balance.resolve.api import frames_to_tc
 from balance.store import ProjectStore, cut_key
 
@@ -78,6 +78,8 @@ def test_analyze_matches_and_writes_cdl(eng):
         assert c["analyzed"] or c["excluded"]
         if c["excluded"] or c["auto"]["method"] != "skin" or shot.tagged:
             continue
+        if shot.cam_sat != 1.0 and not c["total"]["use_sat"]:
+            continue                      # 채도 응답이 다른 카메라인데 채도를 아직 적용하지 않은 컷 (제안 상태)
         slope = slope_of(eng, c["id"])
         assert slope is not None, c["name"]
         want = truth_gain(shot, truth_ref[gname])
@@ -96,6 +98,110 @@ def test_analyze_matches_and_writes_cdl(eng):
     bad = next(c for c in s["cuts"] if c["name"].startswith("GFX_INSERT"))
     assert bad["space_warn"] and not bad["total"]["use_exp"]
     assert any(e.get("type") == "toast" for e in eng.events)
+
+
+def offset_of(eng, cut_id):
+    item = eng.session._items[cut_id]
+    return None if item.cdl is None else np.array([float(v) for v in item.cdl["Offset"].split()])
+
+
+def test_black_haze_matching(eng):
+    """헤이즈로 뜬 블랙: 게인과 선형 오프셋 두 값으로 맞춘다. 정답은 합성 촬영본의 플레어 값."""
+    s = eng.state()
+    truth_ref = {g: next(sh for sh, gn, isref, _ in DEMO if gn == g and isref) for g in ("스튜디오", "LED 스테이지", "골든아워")}
+    shots = {sh.name: (sh, g) for sh, g, _, _ in DEMO}
+    applied = 0
+    for c in s["cuts"]:
+        shot, gname = shots[c["name"]]
+        a = c["auto"]
+        if gname is None or not a or a["method"] != "skin" or shot.tagged:
+            continue
+        want = truth_black(shot, truth_ref[gname])
+        assert np.abs(np.array(a["black_o"]) - want).max() < 0.0015, (c["name"], a["black_o"], want)
+        if any(shot.flare) and c["total"]["use_black"]:
+            assert np.abs(offset_of(eng, c["id"]) - want).max() < 0.0015
+            # 오프셋을 넣어도 스킨(노출을 맞춘 지점)은 그대로: 게인이 정답에 더 가까워진다
+            assert np.abs(np.log2(slope_of(eng, c["id"]) / truth_gain(shot, truth_ref[gname]))).max() < 0.05
+            applied += 1
+        elif not any(shot.flare):
+            assert np.allclose(c["total"]["offset"], 0.0, atol=1e-6)
+    assert applied >= 4
+    assert all(g["black"] == "ref" for g in s["groups"])
+    # 블랙이 화면에 없는 인서트, 스킨으로 이어지지 않은 컷은 제안만 한다
+    mic = by_name(s, "A001C018")
+    assert mic["auto"]["black_method"] == "floor" and not mic["total"]["use_black"] and "black_no_skin" in mic["auto"]["notes"]
+    wide = by_name(s, "A005C012")
+    assert "black_unsure" in wide["auto"]["notes"] and not wide["total"]["use_black"]
+    # 컷에서 끄고 켜기
+    c = by_name(s, "A001C012")
+    eng.set_cut([c["key"]], use_black=False)
+    settle(eng)
+    off = by_name(eng.state(), "A001C012")
+    assert off["total"]["offset"] == [0.0, 0.0, 0.0] and np.allclose(offset_of(eng, c["id"]), 0.0)
+    assert np.allclose(off["total"]["slope"], np.array(off["total"]["wb"]) * 2.0 ** off["total"]["exp"], rtol=1e-4)
+    eng.set_cut([c["key"]], use_black=None)
+    settle(eng)
+    assert by_name(eng.state(), "A001C012")["total"]["use_black"]
+    # 제안으로 남은 컷은 사람이 켤 수 있다
+    eng.set_cut([wide["key"]], use_black=True)
+    settle(eng)
+    assert np.abs(offset_of(eng, wide["id"]) - truth_black(shots[wide["name"]][0], truth_ref["골든아워"])).max() < 0.0015
+    eng.set_cut([wide["key"]], use_black=None)
+    # Offset 방식(DI)에서는 블랙을 쓰지 않는다
+    eng.set_settings(apply_mode="di_offset")
+    settle(eng)
+    assert not by_name(eng.state(), "A001C012")["total"]["use_black"]
+    eng.set_settings(apply_mode="linear_gain")
+    settle(eng)
+    assert np.abs(offset_of(eng, c["id"]) - truth_black(shots[c["name"]][0], truth_ref["스튜디오"])).max() < 0.0015
+    eng.undo_stack.clear()
+
+
+def lut_of(eng, cut_id):
+    return eng.session._items[cut_id].graph.luts.get(2, "")       # 데모 노드 구성: EXPOSURE, MATCH, LOOK
+
+
+def test_saturation_lut(eng):
+    """카메라 단위 채도: 값마다 하나씩 만든 LUT 파일을 MATCH 노드에 건다."""
+    s = eng.state()
+    studio = next(g for g in s["groups"] if g["name"] == "스튜디오")
+    assert [(c["id"], c["n"], c["ref"]) for c in studio["cameras"]] == [("A", 8, True), ("B", 2, False)]
+    for name in ("B002C004", "B002C009"):
+        c = by_name(s, name)
+        assert c["auto"]["cam"] == "B" and abs(c["auto"]["sat"] - 1 / 0.86) < 0.03 and c["total"]["use_sat"]
+        assert lut_of(eng, c["id"]) == "ShotBalance/SB_sat116_den075.cube"
+    assert (eng.lut_root / "ShotBalance" / "SB_sat116_den075.cube").is_file()
+    a = by_name(s, "A001C009")
+    assert a["auto"]["cam"] == "A" and a["total"]["sat"] == 1.0 and lut_of(eng, a["id"]) == ""
+    # 컷이 하나뿐인 카메라: 제안만 한다. 이 컷은 MATCH 노드도 없다
+    c = by_name(s, "C001C002")
+    assert c["auto"]["sat_method"] == "camera" and not c["total"]["use_sat"] and not c["match_node"]
+    # 채도 의도 버튼: 그룹 전체 +5%
+    eng.intent("group", gid=studio["id"], sat=config.SAT_STEP)
+    settle(eng)
+    s2 = eng.state()
+    assert abs(by_name(s2, "A001C009")["total"]["sat"] - 1.05) < 1e-3 and lut_of(eng, a["id"]) == "ShotBalance/SB_sat105_den075.cube"
+    b = by_name(s2, "B002C004")
+    assert abs(b["total"]["sat"] - b["auto"]["sat"] * 1.05) < 1e-3 and lut_of(eng, b["id"]) == "ShotBalance/SB_sat122_den075.cube"
+    assert not any(c["pending"] or c["write_failed"] for c in s2["cuts"])
+    eng.intent("group", gid=studio["id"], sat=-config.SAT_STEP)
+    settle(eng)
+    assert lut_of(eng, a["id"]) == ""                                # 1 로 돌아오면 LUT 를 뗀다
+    # 자동 채도를 끄면 게인도 채도 없이 맞춘 값으로 돌아간다
+    eng.set_cut([b["key"]], use_sat=False)
+    settle(eng)
+    off = by_name(eng.state(), "B002C004")
+    assert off["total"]["sat"] == 1.0 and lut_of(eng, b["id"]) == ""
+    assert np.allclose(off["total"]["slope"], np.array(off["total"]["wb"]) * 2.0 ** off["total"]["exp"] * np.array(off["auto"]["black_k"]), rtol=1e-4)
+    eng.set_cut([b["key"]], use_sat=None)
+    # 밀도 설정을 바꾸면 다른 파일을 건다
+    eng.set_settings(density=1.25)
+    settle(eng)
+    assert lut_of(eng, b["id"]) == "ShotBalance/SB_sat116_den125.cube"
+    eng.set_settings(density=0.75)
+    settle(eng)
+    assert lut_of(eng, b["id"]) == "ShotBalance/SB_sat116_den075.cube"
+    eng.undo_stack.clear()
 
 
 def test_three_layers_and_intent_buttons(eng):
@@ -283,9 +389,42 @@ def test_values_follow_the_source_after_reedit(tmp_path):
     assert again.cut(k1)["intent"]["exp"] == 0.667
 
 
+def test_sync_other_timeline(eng):
+    """티저처럼 같은 소스를 쓰는 다른 타임라인에 값을 복사한다."""
+    s = eng.state()
+    assert [t["name"] for t in s["timelines"]] == ["MV_Edit_v07_color", "MV_Teaser_v03"] and s["timelines"][0]["current"]
+    project = eng.session._project()
+    teaser = project.GetTimelineByIndex(2)
+    n_events = len(eng.events)
+    eng.sync_timelines([s["timelines"][1]["id"]])
+    wait(lambda: eng.job is None)
+    settle(eng)
+    assert project.GetCurrentTimeline().GetName() == "MV_Edit_v07_color"      # 원래 타임라인으로 돌아온다
+    main = {c["name"]: c for c in eng.state()["cuts"]}
+
+    def cdl(item):
+        return [float(v) for v in item.cdl["Slope"].split()], [float(v) for v in item.cdl["Offset"].split()]
+
+    for i in (0, 1, 2, 3, 4, 7):                    # 그대로 쓴 컷과 짧게 자른 컷: 본편과 같은 값
+        item = teaser.items[i]
+        slope, offset = cdl(item)
+        t = main[item.shot.name]["total"]
+        assert np.allclose(slope, t["slope"], atol=1e-5) and np.allclose(offset, t["offset"], atol=1e-5), item.shot.name
+    assert teaser.items[2].shot.name.startswith("B002C004")
+    assert teaser.items[2].graph.luts.get(2) == lut_of(eng, main["B002C004_241102_R2CD"]["id"]) != ""     # 채도 LUT 도 같이
+    assert teaser.items[0].graph.luts.get(2, "") == ""
+    assert teaser.items[5].cdl is None              # EXPOSURE 노드가 없는 컷
+    assert teaser.items[6].cdl is None              # 본편에서 쓰지 않은 구간
+    toast = next(e for e in eng.events[n_events:] if e.get("type") == "toast")
+    assert "6컷에 적용" in toast["text"] and "같은 소스가 없는 컷 1개" in toast["text"] and "노드가 없는 컷 1개" in toast["text"]
+    # 현재 타임라인의 쓰기 상태는 그대로다
+    assert not any(c["pending"] for c in eng.state()["cuts"])
+
+
 def test_helpers():
-    assert cdl_values(1.0, [1, 1, 1], "linear_gain") == ((2.0, 2.0, 2.0), (0.0, 0.0, 0.0))
-    s, o = cdl_values(1.0, [1, 1, 1], "di_offset")
+    t = dict(exp=1.0, wb=[1, 1, 1], slope=[2.0, 2.0, 2.0], offset=[0.0, -0.01, 0.0])
+    assert cdl_values(t, "linear_gain") == ((2.0, 2.0, 2.0), (0.0, -0.01, 0.0))
+    s, o = cdl_values(t, "di_offset")
     assert s == (1.0, 1.0, 1.0) and abs(o[0] - 0.073292) < 1e-6
     assert frames_to_tc(86400, 24) == "01:00:00:00"
     assert frames_to_tc(86400 + 25, 23.976) == "01:00:01:01"

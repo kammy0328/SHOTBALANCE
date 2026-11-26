@@ -65,7 +65,7 @@ def detector_image(lin_dwg: np.ndarray) -> np.ndarray:
     """얼굴 검출기에 넣을 BGR uint8. 검출기는 디스플레이 영상으로 학습됐으므로
     프레임마다 노출을 자동으로 맞추고 뷰 커브를 입힌다 (측정에는 쓰지 않는다)."""
     x = to_rec709_linear(lin_dwg)
-    lum = x @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    lum = x[..., 0] * np.float32(0.2126) + x[..., 1] * np.float32(0.7152) + x[..., 2] * np.float32(0.0722)
     valid = lum[lum > 1e-4]
     med = float(np.median(valid)) if valid.size else 0.18
     hi = float(np.percentile(valid, 90)) if valid.size else 0.18

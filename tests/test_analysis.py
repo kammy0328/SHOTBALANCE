@@ -6,7 +6,7 @@ from balance.analysis import encoding, temporal
 from balance.analysis.clip import analyze_clip
 from balance.analysis.match import ShotIn, match_group, split_gain
 from balance.media.demo_shots import DEMO
-from balance.media.synthetic import SyntheticSource, truth_gain
+from balance.media.synthetic import SyntheticSource, truth_gain, truth_sat
 
 
 @pytest.fixture(scope="module")
@@ -15,7 +15,8 @@ def analyses():
     for k, (shot, grp, isref, dur) in enumerate(DEMO):
         a, thumb = analyze_clip(lambda s=shot: SyntheticSource(s), 10, 10 + dur,
                                 lambda g, s=shot: s.tagged or s.space, None, name=shot.name)
-        assert thumb[:2] == b"\xff\xd8"
+        assert set(thumb) == {"", "h", "t"} and all(v[:2] == b"\xff\xd8" for v in thumb.values())
+        assert set(a["edges"]) == {"h", "t"}
         out[k] = a
     return out
 
@@ -33,7 +34,37 @@ def _err(k, r, ref_k):
     """정답 대비 채널별 오차(스톱)."""
     truth = truth_gain(DEMO[k][0], DEMO[ref_k][0])
     got = 2.0 ** r["exp"] * np.array(r["wb"])
+    if any(DEMO[k][0].flare):                 # 헤이즈가 낀 컷의 게인은 블랙 오프셋과 한 쌍이다
+        got = got * np.array(r["black_k"])
+    if DEMO[k][0].cam_sat != DEMO[ref_k][0].cam_sat:   # 채도 응답이 다른 카메라의 게인은 채도 보정과 한 쌍이다
+        got = got * np.array(r["sat_k"])
     return np.log2(got / truth)
+
+
+def test_saturation_by_camera(analyses):
+    """채도 응답이 다른 B 캠을 카메라 단위로 찾아 한 값으로 맞춘다. 파일 단서가 없어도 영상 특성으로 나눈다."""
+    ks, res, info = _run(analyses, "스튜디오")
+    assert [(c["id"], c["n"], c["ref"]) for c in info["cameras"]] == [("A", 8, True), ("B", 2, False)]
+    assert info["cameras_by"] == "meta"
+    for k in ks:
+        r, shot = res[str(k)], DEMO[k][0]
+        want = truth_sat(shot, DEMO[int(info["ref"])][0])
+        assert abs(r["sat"] - want) < 0.03, (shot.name, r["sat"], want)
+        assert r["cam"] == ("B" if shot.name.startswith("B002") else "A")
+        if shot.cam_sat != 1.0:
+            assert r["sat_method"] == "camera" and r["sat_apply"] and r["sat_conf"] in ("medium", "high")
+    # 메타데이터가 전부 같을 때 (이름도 단서가 없는 변환본)
+    shots = [ShotIn(str(k), k, {**analyses[k], "space": "x", "source": {}}) for k in ks]
+    res2, info2 = match_group(shots, info["ref"])
+    assert info2["cameras_by"] == "image" and [(c["id"], c["n"]) for c in info2["cameras"]] == [("A", 8), ("B", 2)]
+    assert all(abs(res2[str(k)]["sat"] - res[str(k)]["sat"]) < 0.01 for k in ks)
+    # 컷이 하나뿐인 카메라는 값은 구하되 적용하지 않는다
+    ks3, res3, info3 = _run(analyses, "골든아워")
+    c = next(str(k) for k in ks3 if DEMO[k][0].name.startswith("C001"))
+    assert abs(res3[c]["sat"] - truth_sat(DEMO[int(c)][0], DEMO[int(info3["ref"])][0])) < 0.03 and not res3[c]["sat_apply"]
+    # 배경이 일정하지 않은 세트(LED)에서는 채도를 재지 않는다
+    _, res4, info4 = _run(analyses, "LED 스테이지")
+    assert all(r["sat"] == 1.0 for r in res4.values())
 
 
 def test_temporal_kinds(analyses):

@@ -62,13 +62,19 @@ def main():
     (OUT / "thumbs").mkdir(parents=True)
     meta = {}
     for c in extra["cuts"]:
-        name = c["thumb"].split("/")[-1].split("?")[0]
-        shutil.copyfile(eng.cache / "thumbs" / name, OUT / "thumbs" / name)
-        meta[c["key"]] = {"kind": c["kind"], "faces": c["faces"], "thumb": f"demo/thumbs/{name}"}
+        m = {"kind": c["kind"], "faces": c["faces"], "edge": c["edge"]}
+        for field in ("thumb", "thumb_head", "thumb_tail"):
+            name = c[field].split("/")[-1].split("?")[0]
+            shutil.copyfile(eng.cache / "thumbs" / name, OUT / "thumbs" / name)
+            m[field] = f"demo/thumbs/{name}"
+        meta[c["key"]] = m
 
     def fix(state):
         for c in state["cuts"]:
-            c["thumb"] = meta[c["key"]]["thumb"]      # 분석 전에도 같은 그림을 쓴다
+            m = meta[c["key"]]
+            c["thumb"] = m["thumb"]                   # 분석 전에도 같은 그림을 쓴다
+            for field in ("thumb_head", "thumb_tail"):
+                c[field] = m[field] if c["analyzed"] else None
             c["pending"] = False
         state["conn"]["product"] = "DaVinci Resolve Studio (데모)"
         state["job"] = None
@@ -79,7 +85,7 @@ def main():
     truth = {}
     for c in after["cuts"]:
         s = shots[c["name"]]
-        truth[c["key"]] = {"exp": s.cam_stops, "wb": list(s.cam_wb), "space": s.space,
+        truth[c["key"]] = {"exp": s.cam_stops, "wb": list(s.cam_wb), "space": s.space, "flare": list(s.flare), "sat": s.cam_sat,
                            "idents": [f.ident for f in s.figures]}
 
     data = {"before": fix(before), "after": fix(after), "truth": truth, "meta": meta}

@@ -18,11 +18,11 @@ from .analysis import encoding
 from .analysis.clip import ANALYSIS_VERSION, Cancelled, analyze_clip
 from .analysis.faces import MODEL_URLS, SFACE, YUNET, FaceEngine
 from .analysis.match import ShotIn, match_group
-from .color import curves, preview, spaces
+from .color import curves, lut, preview, spaces
 from .color.gamuts import EXPOSURE_W
 from .media.decode import RAW_EXT, DecodeError, VideoSource
 from .media.synthetic import SyntheticSource
-from .resolve import mock
+from .resolve import luts, mock
 from .resolve.api import ResolveError, ResolveSession, load_resolve
 from .store import ProjectStore, new_cut, new_intent
 
@@ -61,13 +61,13 @@ def wb_from_intent(temp: float, tint: float) -> np.ndarray:
     return wb / float(wb @ EXPOSURE_W.astype(np.float64))
 
 
-def cdl_values(exp: float, wb, mode: str) -> tuple[tuple, tuple]:
-    """(Slope, Offset). linear_gain 은 Gamma=Linear 노드의 Gain, di_offset 은 DI 노드의 Offset."""
-    gain = (2.0 ** exp) * np.asarray(wb, np.float64)
+def cdl_values(total: dict, mode: str) -> tuple[tuple, tuple]:
+    """(Slope, Offset). linear_gain 은 Gamma=Linear 노드의 Gain 과 Offset, di_offset 은 DI 노드의 Offset."""
     if mode == "di_offset":
+        gain = (2.0 ** total["exp"]) * np.asarray(total["wb"], np.float64)
         off = curves.DI_C * np.log2(np.maximum(gain, 1e-6))
         return (1.0, 1.0, 1.0), tuple(round(float(v), 6) for v in off)
-    return tuple(round(float(v), 6) for v in gain), (0.0, 0.0, 0.0)
+    return tuple(round(float(v), 6) for v in total["slope"]), tuple(round(float(v), 6) for v in total["offset"])
 
 
 class Engine:
@@ -89,6 +89,10 @@ class Engine:
         self.redo_stack: list[dict] = []
         self.quick: dict[str, str] = {}
         self.failed_writes: set[str] = set()
+        self.timelines: list[dict] = []
+        self.lut_root: Path = luts.master_dir()
+        self.lut_error: str | None = None
+        self.failed_luts: set[str] = set()
         self.faces = FaceEngine(config.model_dirs())
         self.rworker = Worker("resolve")
         self.n_workers = workers or int(np.clip((os.cpu_count() or 4) // 2, 1, 4))
@@ -133,11 +137,14 @@ class Engine:
 
     def _connect(self, demo: bool) -> None:
         try:
-            resolve = mock.demo_resolve() if demo else load_resolve()
+            lut_root = (self.root / "demo" / "LUT") if demo else luts.master_dir()
+            resolve = mock.demo_resolve(lut_root) if demo else load_resolve()
             session = ResolveSession(resolve)
             info = session.describe()
             store = ProjectStore((self.root / "demo") if demo else (self.root / "projects"), info["project"], info["project_id"])
+            session.match_label = store.settings["match_label"]
             cuts = session.scan(store.settings["node_label"])
+            timelines = session.timelines()
         except ResolveError as e:
             with self.lock:
                 self.conn = {"status": "error", "message": str(e), "demo": demo}
@@ -151,6 +158,9 @@ class Engine:
         with self.lock:
             self._flush()
             self.session, self.store = session, store
+            self.lut_root, self.lut_error = lut_root, None
+            self.failed_luts.clear()
+            self.timelines = timelines
             self.conn = {"status": "demo" if demo else "connected", "message": "", "demo": demo, **info}
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -181,12 +191,15 @@ class Engine:
             if info["project_id"] != self.conn.get("project_id"):
                 self._connect(bool(self.conn.get("demo")))      # 다른 프로젝트가 열렸다: 처음부터 다시
                 return
+            self.session.match_label = self.store.settings["match_label"]
             cuts = self.session.scan(self.store.settings["node_label"])
+            timelines = self.session.timelines()
         except ResolveError as e:
             self._toast(str(e), "error")
             return
         with self.lock:
             self.conn.update(info)
+            self.timelines = timelines
             self._set_cuts(cuts)
         self._bump()
         self._start_quick_thumbs()
@@ -252,8 +265,9 @@ class Engine:
             return SyntheticSource(shot)
         return VideoSource(cut["src_path"], cut.get("data_level"))
 
-    def _thumb_name(self, key: str, quick: bool) -> str:
-        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:18] + ("_q" if quick else "") + ".jpg"
+    def _thumb_name(self, key: str, kind: str = "") -> str:
+        """kind: "" 대표 프레임, "q" 분석 전 임시, "h" 컷의 첫 프레임, "t" 컷의 끝 프레임."""
+        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:18] + (f"_{kind}" if kind else "") + ".jpg"
 
     def _start_quick_thumbs(self) -> None:
         with self.lock:
@@ -271,7 +285,7 @@ class Engine:
                 with self._open(cut) as src:
                     _, code = src.read_fast((cut["src_in"] + cut["src_out"]) // 2, cut["src_in"], 480)
                 lin = spaces.to_dwg_linear(code, self._space_for(cut)[0])
-                name = self._thumb_name(key, True)
+                name = self._thumb_name(key, "q")
                 (self.cache / "thumbs" / name).write_bytes(preview.thumb_jpeg(lin))
                 with self.lock:
                     self.quick[key] = name
@@ -286,43 +300,80 @@ class Engine:
         self._bump(save=False)
 
     # ============================================================== 합계
-    def _use_flags(self, c: dict) -> tuple[bool, bool]:
+    def _use_flags(self, c: dict) -> tuple[bool, bool, bool, bool]:
+        """(노출, WB, 블랙, 채도) 자동값을 쓸지."""
         auto, st = c.get("auto"), self.store.settings
         if not auto or c.get("excluded") or auto.get("method") in ("none", "excluded"):
-            return False, False
+            return False, False, False, False
         use_exp = c["use_exp"] if c.get("use_exp") is not None else (auto["exp_apply"] or st["apply_low"])
         has_wb = auto.get("wb_method") not in ("none", None)
         use_wb = c["use_wb"] if c.get("use_wb") is not None else (auto["wb_apply"] or (st["apply_low"] and has_wb))
-        return bool(use_exp), bool(use_wb and st["wb_enabled"] and has_wb)
+        has_black = auto.get("black_method") in ("ref", "floor")
+        use_black = c["use_black"] if c.get("use_black") is not None else (auto.get("black_apply") or st["apply_low"])
+        # 블랙은 노출을 맞춘 상태를 전제로 한 값이고, 선형 Offset 으로만 정확하게 쓸 수 있다
+        use_black = bool(use_black and has_black and use_exp and st["black_enabled"] and st["apply_mode"] == "linear_gain")
+        has_sat = auto.get("sat_method") in ("ref", "camera")
+        use_sat = c["use_sat"] if c.get("use_sat") is not None else (auto.get("sat_apply") or st["apply_low"])
+        use_sat = bool(use_sat and has_sat and use_exp and st["sat_enabled"])
+        return bool(use_exp), bool(use_wb and st["wb_enabled"] and has_wb), use_black, use_sat
 
     def total(self, key: str) -> dict:
+        """컷에 최종으로 들어가는 값.
+        EXPOSURE 노드:  L' = slope · L + offset  (선형).  slope = 의도 게인 · 자동 게인, offset = 의도 게인 · 블랙 오프셋
+        MATCH 노드:     채도 sat (밀도는 설정값)."""
         c = self.store.cuts.get(key) or new_cut()
         if c.get("locked") and c.get("frozen"):
             f = c["frozen"]
-            return dict(exp=f["exp"], wb=list(f["wb"]), auto_exp=0.0, group_exp=0.0, cut_exp=0.0,
-                        use_exp=False, use_wb=False, locked=True)
+            slope = f.get("slope") or [round(float(v) * 2.0 ** f["exp"], 6) for v in f["wb"]]
+            return dict(exp=f["exp"], wb=list(f["wb"]), slope=list(slope), offset=list(f.get("offset") or [0.0, 0.0, 0.0]),
+                        black=f.get("black", 0.0), sat=f.get("sat", 1.0), auto_exp=0.0, group_exp=0.0, cut_exp=0.0,
+                        use_exp=False, use_wb=False, use_black=False, use_sat=False, locked=True)
         g = self.store.groups.get(c.get("group") or "")
         gi = g["intent"] if g else new_intent()
         ci = c["intent"]
-        use_exp, use_wb = self._use_flags(c)
+        use_exp, use_wb, use_black, use_sat = self._use_flags(c)
         auto = c.get("auto") or {}
         a_exp = float(auto.get("exp", 0.0)) if use_exp else 0.0
         a_wb = np.asarray(auto.get("wb", [1, 1, 1]), np.float64) if use_wb else np.ones(3)
         wb = a_wb * wb_from_intent(gi["temp"] + ci["temp"], gi["tint"] + ci["tint"])
-        return dict(exp=round(a_exp + gi["exp"] + ci["exp"], 4), wb=[round(float(v), 5) for v in wb],
+        exp = a_exp + gi["exp"] + ci["exp"]
+        slope = (2.0 ** exp) * wb
+        offset = np.zeros(3)
+        if use_black:
+            slope = slope * np.asarray(auto.get("black_k", [1, 1, 1]), np.float64)
+            offset = (2.0 ** (gi["exp"] + ci["exp"])) * np.asarray(auto.get("black_o", [0, 0, 0]), np.float64)
+        sat = 2.0 ** (gi.get("sat", 0.0) + ci.get("sat", 0.0))
+        if use_sat:
+            sat *= float(auto.get("sat", 1.0))
+            if use_wb:                                # 채도를 넣으면 스킨이 제자리에 남도록 게인을 조금 옮긴다
+                slope = slope * np.asarray(auto.get("sat_k", [1, 1, 1]), np.float64)
+        sat = float(np.clip(sat, lut.SAT_MIN, lut.SAT_MAX))
+        return dict(exp=round(exp, 4), wb=[round(float(v), 5) for v in wb],
+                    slope=[round(float(v), 6) for v in slope], offset=[round(float(v), 6) for v in offset],
+                    black=round(float(auto.get("black", 0.0)), 5) if use_black else 0.0, sat=round(sat, 4),
                     auto_exp=round(a_exp, 4), group_exp=round(gi["exp"], 4), cut_exp=round(ci["exp"], 4),
-                    use_exp=use_exp, use_wb=use_wb, locked=False)
+                    use_exp=use_exp, use_wb=use_wb, use_black=use_black, use_sat=use_sat, locked=False)
 
     def _cdl(self, key: str) -> tuple:
-        t = self.total(key)
-        return cdl_values(t["exp"], t["wb"], self.store.settings["apply_mode"])
+        return cdl_values(self.total(key), self.store.settings["apply_mode"])
+
+    def _lut(self, key: str) -> str:
+        """MATCH 노드에 걸 LUT 의 경로 (Resolve LUT 폴더 기준). 채도가 1 이면 빈 문자열 = LUT 없음."""
+        sat = self.total(key)["sat"]
+        return "" if lut.is_identity(sat) else luts.rel_path(sat, self.store.settings["density"])
 
     # ====================================================== Resolve 에 쓰기
     def _written(self) -> dict:
         w = self.store.data.setdefault("written", {})
         return w.setdefault(self.conn.get("timeline_id", "?"), {})
 
+    def _written_lut(self) -> dict:
+        w = self.store.data.setdefault("written_lut", {})
+        return w.setdefault(self.conn.get("timeline_id", "?"), {})
+
     def _pending(self, cut: dict) -> bool:
+        if cut.get("match_index") is not None and self._written_lut().get(cut["id"], "") != self._lut(cut["key"]):
+            return True
         if cut.get("node_index") is None:
             return False
         want = [list(v) for v in self._cdl(cut["key"])]
@@ -353,12 +404,19 @@ class Engine:
             self._apply_pending = False
             if self.store is None or self.session is None:
                 return
-            todo = []
+            todo, todo_lut = [], []
             for cut in self.cuts:
-                if cut.get("node_index") is None:
-                    continue
-                if rewrite or self._pending(cut):
-                    todo.append((cut, self._cdl(cut["key"])))
+                if cut.get("node_index") is not None:
+                    cdl = self._cdl(cut["key"])
+                    have = self._written().get(cut["id"])
+                    want = [list(v) for v in cdl]
+                    if rewrite or (have != want and not (have is None and want == [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]])):
+                        todo.append((cut, cdl))
+                if cut.get("match_index") is not None:
+                    path = self._lut(cut["key"])
+                    if rewrite or self._written_lut().get(cut["id"], "") != path:
+                        todo_lut.append((cut, path))
+            density, match_label = self.store.settings["density"], self.store.settings["match_label"]
         ok = fail = 0
         for cut, (slope, offset) in todo:
             done = self.session.write_cdl(cut["id"], self.store.settings["node_label"], slope, offset)
@@ -370,18 +428,124 @@ class Engine:
                 else:
                     self.failed_writes.add(cut["id"])
                     fail += 1
-        if todo:
+        ok_lut, fail_lut = self._write_luts(todo_lut, density, match_label, self._written_lut())
+        if todo or todo_lut:
             self._bump()
-        if fail:
-            self._toast(f"{fail}컷은 Resolve 가 값을 받지 않았습니다. 노드 구성을 확인하세요.", "error")
-        elif manual and ok:
-            self._toast(f"{ok}컷에 적용했습니다")
-        elif manual and not todo:
+        if fail or fail_lut:
+            self._toast(f"{fail + fail_lut}컷은 Resolve 가 값을 받지 않았습니다. 노드 구성을 확인하세요.", "error")
+        elif manual and (ok or ok_lut):
+            self._toast(f"{len({c['id'] for c, _ in todo} | {c['id'] for c, _ in todo_lut})}컷에 적용했습니다")
+        elif manual and not todo and not todo_lut:
             self._toast("이미 모두 적용돼 있습니다")
 
-    def goto(self, cut_id: str) -> None:
+    def _write_luts(self, todo: list, density: float, label: str, written: dict, items: dict | None = None) -> tuple[int, int]:
+        """(컷, LUT 경로) 목록을 MATCH 노드에 건다. LUT 파일이 없으면 만들고 Resolve 에 목록을 다시 읽힌다."""
+        if not todo:
+            return 0, 0
+        created = False
+        try:
+            for path in {p for _, p in todo if p}:
+                sat = int(path.split("_sat")[1][:3]) / 100.0
+                created = luts.ensure(self.lut_root, sat, density)[1] or created
+            self.lut_error = None
+        except OSError as e:
+            if self.lut_error is None:
+                self._toast(f"LUT 폴더에 쓸 수 없어 채도 값은 적용하지 못했습니다: {self.lut_root}", "error")
+            self.lut_error = f"{type(e).__name__}: {e}"
+            with self.lock:
+                self.failed_luts.update(c["id"] for c, p in todo if p)
+            return 0, 0
+        if created:
+            self.session.refresh_luts()
+        ok = fail = 0
+        for cut, path in todo:
+            done = self.session.write_lut(cut["id"], label, path, item=(items or {}).get(cut["id"]))
+            with self.lock:
+                if done:
+                    written[cut["id"]] = path
+                    self.failed_luts.discard(cut["id"])
+                    ok += 1
+                else:
+                    self.failed_luts.add(cut["id"])
+                    fail += 1
+        return ok, fail
+
+    def goto(self, cut_id: str, at_start: bool = False) -> None:
+        """재생헤드를 컷 가운데로, at_start 면 컷이 시작하는 프레임(경계)으로."""
         if self.session is not None and self.store is not None and self.store.settings["follow_selection"]:
-            self.rworker.submit(self.session.goto, cut_id)
+            self.rworker.submit(self.session.goto, cut_id, at_start)
+
+    # ======================================================== 다른 타임라인
+    def sync_timelines(self, ids: list[str]) -> None:
+        """같은 소스를 쓰는 다른 타임라인(티저, 다른 버전)에 지금 값을 그대로 쓴다.
+        값은 새로 계산하지 않는다: 이 타임라인에서 정한 값을 소스 구간이 겹치는 컷에 복사한다."""
+        with self.lock:
+            ids = [t for t in ids if t != self.conn.get("timeline_id") and any(x["id"] == t for x in self.timelines)]
+            if self.store is None or self.session is None or self.job is not None or not ids:
+                return
+            self.job = {"kind": "sync", "total": len(ids), "done": 0, "active": [], "cancel": False}
+        self._bump(save=False)
+        self.rworker.submit(self._sync_timelines, ids)
+
+    def _sync_timelines(self, ids: list[str]) -> None:
+        job, label = self.job, self.store.settings["node_label"]
+        report: list[tuple[str, dict | None]] = []
+        try:
+            for tid in ids:
+                if job["cancel"]:
+                    break
+                name = next((t["name"] for t in self.timelines if t["id"] == tid), tid)
+                got = self.session.open_timeline(tid, label)
+                if got is None:
+                    report.append((name, None))
+                    continue
+                cuts, items = got
+                n = dict(ok=0, miss=0, nonode=0, fail=0)
+                todo_lut = []
+                with self.lock:
+                    written = self.store.data.setdefault("written", {}).setdefault(tid, {})
+                    written_lut = self.store.data.setdefault("written_lut", {}).setdefault(tid, {})
+                    density, match_label = self.store.settings["density"], self.store.settings["match_label"]
+                for cut in cuts:
+                    with self.lock:
+                        key = self.store.find(cut["key"])
+                        cdl = self._cdl(key) if key is not None else None
+                        if key is not None and cut.get("match_index") is not None:
+                            todo_lut.append((cut, self._lut(key)))
+                    if cdl is None:
+                        n["miss"] += 1
+                    elif cut["node_index"] is None:
+                        n["nonode"] += 1
+                    elif self.session.write_cdl(cut["id"], label, cdl[0], cdl[1], item=items[cut["id"]]):
+                        written[cut["id"]] = [list(cdl[0]), list(cdl[1])]
+                        n["ok"] += 1
+                    else:
+                        n["fail"] += 1
+                n["fail"] += self._write_luts(todo_lut, density, match_label, written_lut, items)[1]
+                report.append((name, n))
+                with self.lock:
+                    job["done"] += 1
+                self._bump(save=False)
+        finally:
+            try:
+                self.session.restore_timeline()
+            except Exception:  # noqa: BLE001
+                pass
+            with self.lock:
+                self.job = None
+            self._bump()
+        for name, n in report:
+            if n is None:
+                self._toast(f"{name}: 타임라인을 열지 못했습니다", "error")
+                continue
+            msg = f"{name}: {n['ok']}컷에 적용"
+            if n["miss"]:
+                msg += f", 같은 소스가 없는 컷 {n['miss']}개"
+            if n["nonode"]:
+                msg += f", 노드가 없는 컷 {n['nonode']}개"
+            if n["fail"]:
+                msg += f", Resolve 가 받지 않은 컷 {n['fail']}개"
+            self._toast(msg, "warn" if (n["fail"] or n["nonode"]) else "ok")
 
     # ================================================================ 그룹
     def _order(self, key: str) -> int:
@@ -515,7 +679,8 @@ class Engine:
                 a = self._analysis(k)
                 if a is not None and self._is_stale(k):
                     a = None
-                shots.append(ShotIn(k, self._order(k), a, excluded=bool(self.store.cuts[k].get("excluded"))))
+                shots.append(ShotIn(k, self._order(k), a, excluded=bool(self.store.cuts[k].get("excluded")),
+                                    name=self.by_key[k][0]["src_name"]))
             if not any(s.analysis is not None for s in shots):
                 continue
             res, info = match_group(shots, g.get("ref"), g.get("mode", "reference"))
@@ -562,12 +727,14 @@ class Engine:
             job["active"].append(key)
         self._bump(save=False)
         try:
-            a, thumb = analyze_clip(lambda: self._open(cut), cut["src_in"], cut["src_out"],
-                                    lambda g: self._space_for(cut, g)[0], self.faces, name=cut["src_name"],
-                                    cancel=lambda: job["cancel"])
-            name = self._thumb_name(key, False)
-            (self.cache / "thumbs" / name).write_bytes(thumb)
-            entry = {"a": a, "thumb": name, "t": int(time.time())}
+            a, thumbs = analyze_clip(lambda: self._open(cut), cut["src_in"], cut["src_out"],
+                                     lambda g: self._space_for(cut, g)[0], self.faces, name=cut["src_name"],
+                                     cancel=lambda: job["cancel"])
+            entry = {"a": a, "t": int(time.time())}
+            for kind, data in thumbs.items():
+                name = self._thumb_name(key, kind)
+                (self.cache / "thumbs" / name).write_bytes(data)
+                entry["thumb" + ("_" + kind if kind else "")] = name
         except Cancelled:
             entry = None
         except DecodeError as e:
@@ -590,11 +757,18 @@ class Engine:
                     f.result()
         with self.lock:
             cancelled = job["cancel"]
-            self._rematch(groups)
-            errors = sum(1 for k in targets if self.store.analysis.get(k, {}).get("error"))
+            errors = n_flag = 0
+            try:
+                self._rematch(groups)
+                errors = sum(1 for k in targets if self.store.analysis.get(k, {}).get("error"))
+                n_flag = sum(1 for g in groups for k in self._group_keys(g)
+                             if (self.store.cuts[k].get("auto") or {}).get("exp_conf") == "low")
+            except Exception as e:  # noqa: BLE001  매칭이 실패해도 작업 표시는 반드시 내린다
+                self.job = None
+                self._bump()
+                self._toast(f"매칭 중 오류가 났습니다: {type(e).__name__}: {str(e)[:120]}", "error")
+                raise
             self.job = None
-            n_flag = sum(1 for g in groups for k in self._group_keys(g)
-                         if (self.store.cuts[k].get("auto") or {}).get("exp_conf") == "low")
         self._bump()
         self._schedule_apply()
         if cancelled:
@@ -609,7 +783,7 @@ class Engine:
 
     # ================================================================ 의도
     def intent(self, scope: str, keys: list[str] | None = None, gid: str | None = None,
-               exp: float = 0.0, temp: float = 0.0, tint: float = 0.0, reset: bool = False) -> None:
+               exp: float = 0.0, temp: float = 0.0, tint: float = 0.0, sat: float = 0.0, reset: bool = False) -> None:
         with self.lock:
             if self.store is None:
                 return
@@ -633,10 +807,12 @@ class Engine:
                     it["exp"] = round(float(np.clip(it["exp"] + exp, -6, 6)), 4)
                     it["temp"] = round(float(np.clip(it["temp"] + temp, -40, 40)), 3)
                     it["tint"] = round(float(np.clip(it["tint"] + tint, -40, 40)), 3)
+                    it["sat"] = round(float(np.clip(it.get("sat", 0.0) + sat, -1.3, 0.85)), 5)
         self._bump()
         self._schedule_apply()
 
-    def set_cut(self, keys: list[str], locked=None, excluded=None, use_exp=..., use_wb=..., space=...) -> None:
+    def set_cut(self, keys: list[str], locked=None, excluded=None, use_exp=..., use_wb=..., use_black=...,
+                use_sat=..., space=...) -> None:
         with self.lock:
             if self.store is None:
                 return
@@ -649,7 +825,8 @@ class Engine:
                 if locked is not None and bool(locked) != bool(c.get("locked")):
                     if locked:
                         t = self.total(k)
-                        c["frozen"] = {"exp": t["exp"], "wb": t["wb"]}
+                        c["frozen"] = {"exp": t["exp"], "wb": t["wb"], "slope": t["slope"], "offset": t["offset"],
+                                       "black": t["black"], "sat": t["sat"]}
                     else:
                         c["frozen"] = None
                     c["locked"] = bool(locked)
@@ -661,6 +838,10 @@ class Engine:
                     c["use_exp"] = None if use_exp is None else bool(use_exp)
                 if use_wb is not ...:
                     c["use_wb"] = None if use_wb is None else bool(use_wb)
+                if use_black is not ...:
+                    c["use_black"] = None if use_black is None else bool(use_black)
+                if use_sat is not ...:
+                    c["use_sat"] = None if use_sat is None else bool(use_sat)
                 if space is not ...:
                     c["space"] = space if space in spaces.SPACES else None
                     if c.get("group"):
@@ -680,9 +861,14 @@ class Engine:
             for k, v in kw.items():
                 if k not in config.DEFAULT_SETTINGS:
                     continue
-                if k == "node_label":
+                if k in ("node_label", "match_label"):
                     v = str(v).strip()[:40] or config.DEFAULT_SETTINGS[k]
                     rescan = rescan or v != st[k]
+                elif k == "density":
+                    try:
+                        v = lut.quantize(1.0, float(v))[1]
+                    except (TypeError, ValueError):
+                        continue
                 elif k == "apply_mode":
                     if v not in ("linear_gain", "di_offset"):
                         continue
@@ -760,10 +946,12 @@ class Engine:
         with self.lock:
             base = {"version": self.version, "app": {"name": APP_NAME, "version": __version__},
                     "conn": dict(self.conn), "job": None, "groups": [], "cuts": [], "settings": {},
+                    "timelines": [dict(t) for t in self.timelines],
                     "spaces": spaces.options(), "can_undo": False, "can_redo": False,
                     "models": {"detector": self.faces.detector_ready, "recognizer": self.faces.recognizer_ready},
                     "steps": {"exp": config.EXP_STEP, "exp_fine": config.EXP_STEP_FINE,
-                              "exp_coarse": config.EXP_STEP_COARSE, "wb": config.WB_STEP}}
+                              "exp_coarse": config.EXP_STEP_COARSE, "wb": config.WB_STEP, "sat": config.SAT_STEP},
+                    "densities": list(lut.DENSITIES), "lut_error": self.lut_error}
             if self.job is not None:
                 j = self.job
                 base["job"] = {"kind": j["kind"], "total": j["total"], "done": j["done"],
@@ -792,8 +980,12 @@ class Engine:
                     "id": cut["id"], "key": k, "index": cut["index"], "name": cut["name"], "track": cut["track"],
                     "start": cut["start"], "dur": cut["dur"], "fps": cut["fps"], "group": gid,
                     "thumb": f"thumb/{thumb}?v={entry.get('t', 0) if entry.get('thumb') else 'q'}" if thumb else None,
+                    "thumb_head": f"thumb/{entry['thumb_h']}?v={entry.get('t', 0)}" if entry.get("thumb_h") else None,
+                    "thumb_tail": f"thumb/{entry['thumb_t']}?v={entry.get('t', 0)}" if entry.get("thumb_t") else None,
+                    "edge": (a.get("edges") if a and not stale else None),
                     "media_ok": cut["media_ok"], "media_note": cut.get("media_note") or entry.get("error"),
-                    "node": cut.get("node_index") is not None, "retimed": bool(cut.get("retimed")),
+                    "node": cut.get("node_index") is not None, "match_node": cut.get("match_index") is not None,
+                    "retimed": bool(cut.get("retimed")),
                     "space": sid, "space_label": spaces.SPACES[sid].label, "space_source": ssrc, "space_warn": warn,
                     "analyzed": a is not None and not stale, "stale": stale, "busy": k in active,
                     "error": entry.get("error"),
@@ -801,8 +993,10 @@ class Engine:
                     "detector": a.get("detector") if a else None,
                     "auto": auto, "intent": dict(c["intent"]), "locked": bool(c.get("locked")),
                     "excluded": bool(c.get("excluded")), "use_exp": c.get("use_exp"), "use_wb": c.get("use_wb"),
+                    "use_black": c.get("use_black"), "use_sat": c.get("use_sat"),
                     "space_user": c.get("space"), "total": t, "is_ref": bool(g and g.get("ref") == k),
-                    "pending": self._pending(cut), "write_failed": cut["id"] in self.failed_writes,
+                    "pending": self._pending(cut),
+                    "write_failed": cut["id"] in self.failed_writes or cut["id"] in self.failed_luts,
                 }
                 base["cuts"].append(item)
                 if gid:
@@ -820,6 +1014,8 @@ class Engine:
                 base["groups"].append({"id": gid, "name": g["name"], "color": g["color"], "mode": g["mode"],
                                        "ref": g.get("ref"), "intent": dict(g["intent"]), **n,
                                        "identities": info.get("identities", 0), "ref_used": info.get("ref"),
+                               "black": info.get("black"), "cameras": info.get("cameras", []),
+                               "cameras_by": info.get("cameras_by"),
                                        "bridge": info.get("bridge")})
             return base
 
