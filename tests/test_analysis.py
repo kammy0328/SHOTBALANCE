@@ -33,6 +33,8 @@ def _err(k, r, ref_k):
     """정답 대비 채널별 오차(스톱)."""
     truth = truth_gain(DEMO[k][0], DEMO[ref_k][0])
     got = 2.0 ** r["exp"] * np.array(r["wb"])
+    if any(DEMO[k][0].flare):                 # 헤이즈가 낀 컷의 게인은 블랙 오프셋과 한 쌍이다
+        got = got * np.array(r["black_k"])
     return np.log2(got / truth)
 
 

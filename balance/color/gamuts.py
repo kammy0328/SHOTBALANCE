@@ -68,8 +68,21 @@ def matrix32(src: str, dst: str) -> np.ndarray:
 
 
 def apply(rgb: np.ndarray, m: np.ndarray) -> np.ndarray:
-    """(..., 3) 배열에 3x3 행렬 적용."""
-    return (rgb.reshape(-1, 3) @ m.T.astype(rgb.dtype)).reshape(rgb.shape)
+    """(..., 3) 배열에 3x3 행렬 적용.
+
+    행렬곱(@)을 쓰지 않고 채널별로 계산한다. 영상 크기 배열의 @ 는 BLAS 로 넘어가는데,
+    분석 스레드 여러 개가 동시에 부르면 Windows 의 OpenBLAS 가 access violation 으로 죽는다."""
+    m = np.asarray(m, rgb.dtype)
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    out = np.empty_like(rgb)
+    for i in range(3):
+        out[..., i] = r * m[i, 0] + g * m[i, 1] + b * m[i, 2]
+    return out
+
+
+def weighted(rgb: np.ndarray, w) -> np.ndarray:
+    """(..., 3) 배열의 채널 가중합 (BLAS 를 거치지 않는다)."""
+    return rgb[..., 0] * w[0] + rgb[..., 1] * w[1] + rgb[..., 2] * w[2]
 
 
 #: DWG 선형에서의 CIE Y 계수 (참고용. 파란 계수가 음수라 LED 조명에서 불안정하다)

@@ -7,7 +7,7 @@ import pytest
 from balance import config
 from balance.core import Engine, cdl_values, wb_from_intent
 from balance.media.demo_shots import DEMO
-from balance.media.synthetic import truth_gain
+from balance.media.synthetic import truth_black, truth_gain
 from balance.resolve.api import frames_to_tc
 from balance.store import ProjectStore, cut_key
 
@@ -96,6 +96,63 @@ def test_analyze_matches_and_writes_cdl(eng):
     bad = next(c for c in s["cuts"] if c["name"].startswith("GFX_INSERT"))
     assert bad["space_warn"] and not bad["total"]["use_exp"]
     assert any(e.get("type") == "toast" for e in eng.events)
+
+
+def offset_of(eng, cut_id):
+    item = eng.session._items[cut_id]
+    return None if item.cdl is None else np.array([float(v) for v in item.cdl["Offset"].split()])
+
+
+def test_black_haze_matching(eng):
+    """헤이즈로 뜬 블랙: 게인과 선형 오프셋 두 값으로 맞춘다. 정답은 합성 촬영본의 플레어 값."""
+    s = eng.state()
+    truth_ref = {g: next(sh for sh, gn, isref, _ in DEMO if gn == g and isref) for g in ("스튜디오", "LED 스테이지", "골든아워")}
+    shots = {sh.name: (sh, g) for sh, g, _, _ in DEMO}
+    applied = 0
+    for c in s["cuts"]:
+        shot, gname = shots[c["name"]]
+        a = c["auto"]
+        if gname is None or not a or a["method"] != "skin" or shot.tagged:
+            continue
+        want = truth_black(shot, truth_ref[gname])
+        assert np.abs(np.array(a["black_o"]) - want).max() < 0.0015, (c["name"], a["black_o"], want)
+        if any(shot.flare) and c["total"]["use_black"]:
+            assert np.abs(offset_of(eng, c["id"]) - want).max() < 0.0015
+            # 오프셋을 넣어도 스킨(노출을 맞춘 지점)은 그대로: 게인이 정답에 더 가까워진다
+            assert np.abs(np.log2(slope_of(eng, c["id"]) / truth_gain(shot, truth_ref[gname]))).max() < 0.05
+            applied += 1
+        elif not any(shot.flare):
+            assert np.allclose(c["total"]["offset"], 0.0, atol=1e-6)
+    assert applied >= 4
+    assert all(g["black"] == "ref" for g in s["groups"])
+    # 블랙이 화면에 없는 인서트, 스킨으로 이어지지 않은 컷은 제안만 한다
+    mic = by_name(s, "A001C018")
+    assert mic["auto"]["black_method"] == "floor" and not mic["total"]["use_black"] and "black_no_skin" in mic["auto"]["notes"]
+    wide = by_name(s, "A005C012")
+    assert "black_unsure" in wide["auto"]["notes"] and not wide["total"]["use_black"]
+    # 컷에서 끄고 켜기
+    c = by_name(s, "A001C012")
+    eng.set_cut([c["key"]], use_black=False)
+    settle(eng)
+    off = by_name(eng.state(), "A001C012")
+    assert off["total"]["offset"] == [0.0, 0.0, 0.0] and np.allclose(offset_of(eng, c["id"]), 0.0)
+    assert np.allclose(off["total"]["slope"], np.array(off["total"]["wb"]) * 2.0 ** off["total"]["exp"], rtol=1e-4)
+    eng.set_cut([c["key"]], use_black=None)
+    settle(eng)
+    assert by_name(eng.state(), "A001C012")["total"]["use_black"]
+    # 제안으로 남은 컷은 사람이 켤 수 있다
+    eng.set_cut([wide["key"]], use_black=True)
+    settle(eng)
+    assert np.abs(offset_of(eng, wide["id"]) - truth_black(shots[wide["name"]][0], truth_ref["골든아워"])).max() < 0.0015
+    eng.set_cut([wide["key"]], use_black=None)
+    # Offset 방식(DI)에서는 블랙을 쓰지 않는다
+    eng.set_settings(apply_mode="di_offset")
+    settle(eng)
+    assert not by_name(eng.state(), "A001C012")["total"]["use_black"]
+    eng.set_settings(apply_mode="linear_gain")
+    settle(eng)
+    assert np.abs(offset_of(eng, c["id"]) - truth_black(shots[c["name"]][0], truth_ref["스튜디오"])).max() < 0.0015
+    eng.undo_stack.clear()
 
 
 def test_three_layers_and_intent_buttons(eng):
@@ -284,8 +341,9 @@ def test_values_follow_the_source_after_reedit(tmp_path):
 
 
 def test_helpers():
-    assert cdl_values(1.0, [1, 1, 1], "linear_gain") == ((2.0, 2.0, 2.0), (0.0, 0.0, 0.0))
-    s, o = cdl_values(1.0, [1, 1, 1], "di_offset")
+    t = dict(exp=1.0, wb=[1, 1, 1], slope=[2.0, 2.0, 2.0], offset=[0.0, -0.01, 0.0])
+    assert cdl_values(t, "linear_gain") == ((2.0, 2.0, 2.0), (0.0, -0.01, 0.0))
+    s, o = cdl_values(t, "di_offset")
     assert s == (1.0, 1.0, 1.0) and abs(o[0] - 0.073292) < 1e-6
     assert frames_to_tc(86400, 24) == "01:00:00:00"
     assert frames_to_tc(86400 + 25, 23.976) == "01:00:01:01"

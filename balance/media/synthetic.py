@@ -44,6 +44,7 @@ class Shot:
     pan: tuple = (0.0, 0.0)
     cam_stops: float = 0.0             # 촬영본에 구워진 노출 오차
     cam_wb: tuple = (1.0, 1.0, 1.0)    # 촬영본에 구워진 WB 오차 (채널 게인)
+    flare: tuple = (0.0, 0.0, 0.0)     # 헤이즈 · 렌즈 플레어로 뜬 블랙 (장면 선형, DWG)
     space: str = "slog3_sgamut3cine"   # 실제 인코딩
     tagged: str | None = None          # Resolve 에 지정돼 있는 입력 색공간 (None = 올바름)
     n_frames: int = 72
@@ -229,7 +230,7 @@ def render_scene(shot: Shot, index: int, w: int, h: int, layers: dict | None = N
 def camera_encode(lin_dwg: np.ndarray, shot: Shot, index: int) -> np.ndarray:
     """장면 → 촬영본 코드값 (노출/WB 오차, 인코딩, 노이즈, 10비트 양자화)."""
     gain = (2.0 ** shot.cam_stops) * _c(shot.cam_wb)
-    x = lin_dwg * gain
+    x = (lin_dwg + _c(shot.flare)) * gain
     sp = spaces.SPACES[shot.space]
     if sp.kind == "display":
         x = gamuts.apply(x, gamuts.matrix32("dwg", sp.gamut))
@@ -296,3 +297,8 @@ class SyntheticSource:
 def truth_gain(shot: Shot, ref: Shot) -> np.ndarray:
     """shot 을 ref 에 맞추는 정답: 채널별 총 선형 게인 (노출 포함)."""
     return (2.0 ** ref.cam_stops * _c(ref.cam_wb)) / (2.0 ** shot.cam_stops * _c(shot.cam_wb))
+
+
+def truth_black(shot: Shot, ref: Shot) -> np.ndarray:
+    """shot 을 ref 에 맞추는 정답의 선형 오프셋 (게인 적용 뒤, ref 의 노출 단위). L' = gain·L + offset."""
+    return (2.0 ** ref.cam_stops * _c(ref.cam_wb)) * (_c(ref.flare) - _c(shot.flare))

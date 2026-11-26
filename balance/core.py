@@ -61,13 +61,13 @@ def wb_from_intent(temp: float, tint: float) -> np.ndarray:
     return wb / float(wb @ EXPOSURE_W.astype(np.float64))
 
 
-def cdl_values(exp: float, wb, mode: str) -> tuple[tuple, tuple]:
-    """(Slope, Offset). linear_gain 은 Gamma=Linear 노드의 Gain, di_offset 은 DI 노드의 Offset."""
-    gain = (2.0 ** exp) * np.asarray(wb, np.float64)
+def cdl_values(total: dict, mode: str) -> tuple[tuple, tuple]:
+    """(Slope, Offset). linear_gain 은 Gamma=Linear 노드의 Gain 과 Offset, di_offset 은 DI 노드의 Offset."""
     if mode == "di_offset":
+        gain = (2.0 ** total["exp"]) * np.asarray(total["wb"], np.float64)
         off = curves.DI_C * np.log2(np.maximum(gain, 1e-6))
         return (1.0, 1.0, 1.0), tuple(round(float(v), 6) for v in off)
-    return tuple(round(float(v), 6) for v in gain), (0.0, 0.0, 0.0)
+    return tuple(round(float(v), 6) for v in total["slope"]), tuple(round(float(v), 6) for v in total["offset"])
 
 
 class Engine:
@@ -286,36 +286,51 @@ class Engine:
         self._bump(save=False)
 
     # ============================================================== 합계
-    def _use_flags(self, c: dict) -> tuple[bool, bool]:
+    def _use_flags(self, c: dict) -> tuple[bool, bool, bool]:
         auto, st = c.get("auto"), self.store.settings
         if not auto or c.get("excluded") or auto.get("method") in ("none", "excluded"):
-            return False, False
+            return False, False, False
         use_exp = c["use_exp"] if c.get("use_exp") is not None else (auto["exp_apply"] or st["apply_low"])
         has_wb = auto.get("wb_method") not in ("none", None)
         use_wb = c["use_wb"] if c.get("use_wb") is not None else (auto["wb_apply"] or (st["apply_low"] and has_wb))
-        return bool(use_exp), bool(use_wb and st["wb_enabled"] and has_wb)
+        has_black = auto.get("black_method") in ("ref", "floor")
+        use_black = c["use_black"] if c.get("use_black") is not None else (auto.get("black_apply") or st["apply_low"])
+        # 블랙은 노출을 맞춘 상태를 전제로 한 값이고, 선형 Offset 으로만 정확하게 쓸 수 있다
+        use_black = bool(use_black and has_black and use_exp and st["black_enabled"] and st["apply_mode"] == "linear_gain")
+        return bool(use_exp), bool(use_wb and st["wb_enabled"] and has_wb), use_black
 
     def total(self, key: str) -> dict:
+        """컷에 최종으로 들어가는 값.  L' = slope · L + offset  (선형).
+        slope = 의도 게인 · 자동 게인,  offset = 의도 게인 · 블랙 오프셋."""
         c = self.store.cuts.get(key) or new_cut()
         if c.get("locked") and c.get("frozen"):
             f = c["frozen"]
-            return dict(exp=f["exp"], wb=list(f["wb"]), auto_exp=0.0, group_exp=0.0, cut_exp=0.0,
-                        use_exp=False, use_wb=False, locked=True)
+            slope = f.get("slope") or [round(float(v) * 2.0 ** f["exp"], 6) for v in f["wb"]]
+            return dict(exp=f["exp"], wb=list(f["wb"]), slope=list(slope), offset=list(f.get("offset") or [0.0, 0.0, 0.0]),
+                        black=f.get("black", 0.0), auto_exp=0.0, group_exp=0.0, cut_exp=0.0,
+                        use_exp=False, use_wb=False, use_black=False, locked=True)
         g = self.store.groups.get(c.get("group") or "")
         gi = g["intent"] if g else new_intent()
         ci = c["intent"]
-        use_exp, use_wb = self._use_flags(c)
+        use_exp, use_wb, use_black = self._use_flags(c)
         auto = c.get("auto") or {}
         a_exp = float(auto.get("exp", 0.0)) if use_exp else 0.0
         a_wb = np.asarray(auto.get("wb", [1, 1, 1]), np.float64) if use_wb else np.ones(3)
         wb = a_wb * wb_from_intent(gi["temp"] + ci["temp"], gi["tint"] + ci["tint"])
-        return dict(exp=round(a_exp + gi["exp"] + ci["exp"], 4), wb=[round(float(v), 5) for v in wb],
+        exp = a_exp + gi["exp"] + ci["exp"]
+        slope = (2.0 ** exp) * wb
+        offset = np.zeros(3)
+        if use_black:
+            slope = slope * np.asarray(auto.get("black_k", [1, 1, 1]), np.float64)
+            offset = (2.0 ** (gi["exp"] + ci["exp"])) * np.asarray(auto.get("black_o", [0, 0, 0]), np.float64)
+        return dict(exp=round(exp, 4), wb=[round(float(v), 5) for v in wb],
+                    slope=[round(float(v), 6) for v in slope], offset=[round(float(v), 6) for v in offset],
+                    black=round(float(auto.get("black", 0.0)), 5) if use_black else 0.0,
                     auto_exp=round(a_exp, 4), group_exp=round(gi["exp"], 4), cut_exp=round(ci["exp"], 4),
-                    use_exp=use_exp, use_wb=use_wb, locked=False)
+                    use_exp=use_exp, use_wb=use_wb, use_black=use_black, locked=False)
 
     def _cdl(self, key: str) -> tuple:
-        t = self.total(key)
-        return cdl_values(t["exp"], t["wb"], self.store.settings["apply_mode"])
+        return cdl_values(self.total(key), self.store.settings["apply_mode"])
 
     # ====================================================== Resolve 에 쓰기
     def _written(self) -> dict:
@@ -590,11 +605,18 @@ class Engine:
                     f.result()
         with self.lock:
             cancelled = job["cancel"]
-            self._rematch(groups)
-            errors = sum(1 for k in targets if self.store.analysis.get(k, {}).get("error"))
+            errors = n_flag = 0
+            try:
+                self._rematch(groups)
+                errors = sum(1 for k in targets if self.store.analysis.get(k, {}).get("error"))
+                n_flag = sum(1 for g in groups for k in self._group_keys(g)
+                             if (self.store.cuts[k].get("auto") or {}).get("exp_conf") == "low")
+            except Exception as e:  # noqa: BLE001  매칭이 실패해도 작업 표시는 반드시 내린다
+                self.job = None
+                self._bump()
+                self._toast(f"매칭 중 오류가 났습니다: {type(e).__name__}: {str(e)[:120]}", "error")
+                raise
             self.job = None
-            n_flag = sum(1 for g in groups for k in self._group_keys(g)
-                         if (self.store.cuts[k].get("auto") or {}).get("exp_conf") == "low")
         self._bump()
         self._schedule_apply()
         if cancelled:
@@ -636,7 +658,8 @@ class Engine:
         self._bump()
         self._schedule_apply()
 
-    def set_cut(self, keys: list[str], locked=None, excluded=None, use_exp=..., use_wb=..., space=...) -> None:
+    def set_cut(self, keys: list[str], locked=None, excluded=None, use_exp=..., use_wb=..., use_black=...,
+                space=...) -> None:
         with self.lock:
             if self.store is None:
                 return
@@ -649,7 +672,8 @@ class Engine:
                 if locked is not None and bool(locked) != bool(c.get("locked")):
                     if locked:
                         t = self.total(k)
-                        c["frozen"] = {"exp": t["exp"], "wb": t["wb"]}
+                        c["frozen"] = {"exp": t["exp"], "wb": t["wb"], "slope": t["slope"], "offset": t["offset"],
+                                       "black": t["black"]}
                     else:
                         c["frozen"] = None
                     c["locked"] = bool(locked)
@@ -661,6 +685,8 @@ class Engine:
                     c["use_exp"] = None if use_exp is None else bool(use_exp)
                 if use_wb is not ...:
                     c["use_wb"] = None if use_wb is None else bool(use_wb)
+                if use_black is not ...:
+                    c["use_black"] = None if use_black is None else bool(use_black)
                 if space is not ...:
                     c["space"] = space if space in spaces.SPACES else None
                     if c.get("group"):
@@ -801,6 +827,7 @@ class Engine:
                     "detector": a.get("detector") if a else None,
                     "auto": auto, "intent": dict(c["intent"]), "locked": bool(c.get("locked")),
                     "excluded": bool(c.get("excluded")), "use_exp": c.get("use_exp"), "use_wb": c.get("use_wb"),
+                    "use_black": c.get("use_black"),
                     "space_user": c.get("space"), "total": t, "is_ref": bool(g and g.get("ref") == k),
                     "pending": self._pending(cut), "write_failed": cut["id"] in self.failed_writes,
                 }
@@ -820,6 +847,7 @@ class Engine:
                 base["groups"].append({"id": gid, "name": g["name"], "color": g["color"], "mode": g["mode"],
                                        "ref": g.get("ref"), "intent": dict(g["intent"]), **n,
                                        "identities": info.get("identities", 0), "ref_used": info.get("ref"),
+                               "black": info.get("black"),
                                        "bridge": info.get("bridge")})
             return base
 

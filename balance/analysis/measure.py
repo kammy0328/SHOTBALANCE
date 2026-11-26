@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..color.gamuts import EXPOSURE_W
+from ..color.gamuts import EXPOSURE_W, weighted
 
 EPS = 1e-6
 PCTS = (1, 10, 25, 50, 75, 90, 95, 99)
 ANCHOR_KEYS = ("p50", "p75", "p90", "p95")
 _LUMA = np.array([0.2126, 0.7152, 0.0722], np.float32)
+BLOCK = 8            # 블랙 플로어를 재는 블록 한 변 (통계용 프레임 기준 픽셀)
 
 
 def clip_mask(code: np.ndarray) -> tuple[np.ndarray, float]:
@@ -24,9 +25,49 @@ def clip_mask(code: np.ndarray) -> tuple[np.ndarray, float]:
     return m, frac
 
 
+def content_slice(code: np.ndarray) -> tuple[slice, slice]:
+    """구워진 레터박스 · 필러박스를 뺀 영역. 바는 줄 전체가 평평하고 가장 어둡다."""
+    def run(flat: np.ndarray, dark: np.ndarray) -> int:
+        n = 0
+        while n < flat.size // 3 and flat[n] and dark[n]:
+            n += 1
+        return n
+    luma = weighted(code, _LUMA)
+    out = []
+    for axis in (1, 0):                                   # 행 방향, 열 방향
+        rng = luma.max(axis=axis) - luma.min(axis=axis)
+        mean = luma.mean(axis=axis)
+        flat, dark = rng < 0.006, mean < float(mean.min()) + 0.01
+        a, b = run(flat, dark), run(flat[::-1], dark[::-1])
+        n = flat.size
+        if a + b < 0.04 * n:                              # 바라고 하기엔 너무 얇다
+            a = b = 0
+        out.append(slice(a, n - b))
+    return out[0], out[1]
+
+
+def floor_stats(lin: np.ndarray) -> tuple[list, float]:
+    """블랙 플로어. 8×8 블록 평균(노이즈를 평균한 값) 중 가장 어두운 0.4% 의 평균색과,
+    그 바로 위 띠(0.4~1%)와의 차이를 돌려준다. 차이가 작으면 블랙이 '면'으로 깔려 있다는 뜻이다."""
+    h, w = lin.shape[:2]
+    hb, wb = h // BLOCK, w // BLOCK
+    if hb < 4 or wb < 4:
+        px = lin.reshape(-1, 3)
+        return [float(v) for v in px[np.argsort(weighted(px, EXPOSURE_W))[: max(4, px.shape[0] // 100)]].mean(axis=0)], 1.0
+    blk = lin[: hb * BLOCK, : wb * BLOCK].reshape(hb, BLOCK, wb, BLOCK, 3).mean(axis=(1, 3)).reshape(-1, 3)
+    e = weighted(blk, EXPOSURE_W)
+    order = np.argsort(e)
+    n1 = max(4, int(round(e.size * 0.004)))
+    n2 = max(n1 + 4, int(round(e.size * 0.01)))
+    floor = blk[order[:n1]].mean(axis=0)
+    return [float(v) for v in floor], float(e[order[n1:n2]].mean() - float(floor @ EXPOSURE_W))
+
+
 def frame_stats(lin: np.ndarray, code: np.ndarray) -> dict:
     """lin: DWG 선형, code: 같은 프레임의 코드값. 둘 다 (h, w, 3)."""
-    e = lin @ EXPOSURE_W
+    rows, cols = content_slice(code)
+    lin, code = lin[rows, cols], code[rows, cols]
+    e = weighted(lin, EXPOSURE_W)
     clipped, clip_frac = clip_mask(code)
     valid = (~clipped) & (e > 2e-4)
     if valid.sum() < 64:
@@ -52,16 +93,15 @@ def frame_stats(lin: np.ndarray, code: np.ndarray) -> dict:
     out["sat"] = float(np.median(sat))
     out["sat_neutral"] = float(np.median(sat[idx]))
 
-    # 블랙 플로어 (v2 헤이즈 매칭용으로 함께 저장)
-    floor = e <= np.percentile(e, 1.5)
-    out["black"] = [float(v) for v in lin[floor].mean(axis=0)]
+    # 블랙 플로어 (블랙/헤이즈 매칭)
+    out["black"], out["black_spread"] = floor_stats(lin)
 
     return out
 
 
 def signal_stats(code: np.ndarray) -> dict:
     """코드값 신호 통계 (입력 색공간 추정용). 선형화 전의 값으로 계산한다."""
-    luma = code @ _LUMA
+    luma = weighted(code, _LUMA)
     mx = code.max(axis=-1)
     lv = np.percentile(luma, (0.1, 1, 50))
     return dict(lo=float(lv[0]), p1=float(lv[1]), med=float(lv[2]),
@@ -80,6 +120,7 @@ def merge_stats(stats: list[dict], offsets: list[float]) -> dict:
     out["sat_neutral"] = float(np.median([s["sat_neutral"] for s in stats]))
     out["clip"] = float(np.median([s["clip"] for s in stats]))
     out["black"] = [float(np.median([s["black"][i] * (2.0 ** o) for s, o in zip(stats, offsets)])) for i in range(3)]
+    out["black_spread"] = float(np.median([s["black_spread"] * (2.0 ** o) for s, o in zip(stats, offsets)]))
     return out
 
 
@@ -107,7 +148,7 @@ def _patch_pixels(lin, clipped, center, u, v, ru, rv):
 def _patch_center(px, cl):
     """패치의 대표색. 밝기 순으로 가운데 절반만 평균해 스페큘러 · 그림자 · 머리카락을 양쪽에서 걸러낸다.
     spec 은 패치 안에 하이라이트 구조가 얼마나 있는지(스톱)."""
-    e = px @ EXPOSURE_W
+    e = weighted(px, EXPOSURE_W)
     ok = (~cl) & (e > 1e-4)
     if ok.sum() < 6:
         return None

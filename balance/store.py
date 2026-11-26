@@ -32,7 +32,8 @@ def split_key(key: str) -> tuple[str, int, int]:
 
 def new_cut() -> dict:
     return {"group": None, "intent": {"exp": 0.0, "temp": 0.0, "tint": 0.0}, "auto": None,
-            "locked": False, "frozen": None, "excluded": False, "use_exp": None, "use_wb": None, "space": None}
+            "locked": False, "frozen": None, "excluded": False, "use_exp": None, "use_wb": None, "use_black": None,
+            "space": None}
 
 
 def new_intent() -> dict:

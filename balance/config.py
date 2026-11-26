@@ -79,6 +79,7 @@ DEFAULT_SETTINGS = {
     "auto_apply": True,                # 값이 바뀌면 바로 Resolve 에 쓴다
     "apply_low": False,                # 신뢰도 낮은 자동값도 적용
     "wb_enabled": True,                # WB 매칭 사용
+    "black_enabled": True,             # 블랙/헤이즈 매칭 사용 (Linear Gain 방식에서만)
     "default_log": "slog3_sgamut3cine",
     "default_display": "rec709_g24",
     "follow_selection": True,          # 컷을 고르면 Resolve 재생헤드도 이동

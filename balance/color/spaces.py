@@ -70,7 +70,7 @@ def from_dwg_linear(lin: np.ndarray, space_id: str) -> np.ndarray:
 
 def exposure_index(lin: np.ndarray) -> np.ndarray:
     """DWG 선형 RGB (..., 3) → 노출 지표 E (양수 가중합)."""
-    return lin @ gamuts.EXPOSURE_W
+    return gamuts.weighted(lin, gamuts.EXPOSURE_W)
 
 
 # ----------------------------------------------------- Resolve 이름 매핑

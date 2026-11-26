@@ -1,11 +1,25 @@
 import os
+import shutil
 import subprocess
 import sys
 
-import numpy as np
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import balance  # noqa: E402,F401  numpy 보다 먼저: BLAS 스레드 수를 여기서 고정한다
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+
+
+def ffmpeg_exe() -> str | None:
+    """시스템의 ffmpeg, 없으면 imageio-ffmpeg 가 들고 있는 실행 파일."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
 
 W, H, N = 256, 144, 16
 PATCHES = [  # R'G'B' 코드값 (0..1)
@@ -67,6 +81,9 @@ def _ycbcr(frames: np.ndarray, k: str, legal: bool, bits: int) -> np.ndarray:
 @pytest.fixture(scope="session")
 def clips(tmp_path_factory):
     pytest.importorskip("colour")
+    exe = ffmpeg_exe()
+    if exe is None:
+        pytest.skip("ffmpeg 실행 파일이 없습니다")
     d = tmp_path_factory.mktemp("clips")
     paths = {}
     for name, (k, legal, bits, pix, vf, codec, ext) in VARIANTS.items():
@@ -74,7 +91,7 @@ def clips(tmp_path_factory):
         raw = d / f"{name}.yuv"
         _ycbcr(make_frames(w, h, n), k, legal, bits).tofile(raw)
         out = d / f"{name}.{ext}"
-        cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{w}x{h}",
+        cmd = [exe, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{w}x{h}",
                "-r", "24", "-i", str(raw), "-vf", vf, *codec, str(out)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:

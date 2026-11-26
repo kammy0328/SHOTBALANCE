@@ -10,7 +10,7 @@ from . import encoding, measure, temporal
 from .faces import FaceEngine, similarity
 
 #: 측정 방식이 바뀌면 올린다. 캐시된 분석 결과가 무효가 된다.
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 
 STAT_SIDE = 480        # 통계용 프레임 긴 변
 FACE_SIDE = 1280       # 얼굴·스킨 측정용 프레임 긴 변
@@ -133,6 +133,7 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
 
         # 4) 얼굴 · 스킨
         obs: list[dict] = []
+        floors: list[tuple[list, float]] = []
         detector = "none"
         for i in rep:
             check()
@@ -140,6 +141,10 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
             lin_hi = spaces.to_dwg_linear(code_hi, space)
             clipped, _ = measure.clip_mask(code_hi)
             h, w = lin_hi.shape[:2]
+            # 블랙 플로어는 해상도가 높을수록 작은 그늘까지 잡힌다 (와이드 샷에서 덜 뜬다)
+            rows, cols = measure.content_slice(code_hi)
+            fl, sp = measure.floor_stats(lin_hi[rows, cols])
+            floors.append(([v * float(2.0 ** offs[i]) for v in fl], sp * float(2.0 ** offs[i])))
             hints = src.face_hints(i, (h, w))
             gain = np.float32(2.0 ** offs[i])
             if hints is not None:
@@ -164,6 +169,9 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                                     clip=sk["clip"], ident=None, emb=emb, size=sk["iod"] / w,
                                     box=[d["box"][0] / w, d["box"][1] / h, d["box"][2] / w, d["box"][3] / h]))
         faces = _cluster(obs)
+        if floors:
+            merged["black"] = [float(np.median([f[0][c] for f in floors])) for c in range(3)]
+            merged["black_spread"] = float(np.median([f[1] for f in floors]))
 
         info = src.info
         return dict(
