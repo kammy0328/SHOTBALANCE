@@ -85,7 +85,7 @@ def _actions(engine: Engine, quit_cb):
         "undo": lambda d: engine.undo(),
         "redo": lambda d: engine.redo(),
         "settings": lambda d: engine.set_settings(**d),
-        "goto": lambda d: engine.goto(str(d.get("id", ""))),
+        "goto": lambda d: engine.goto(str(d.get("id", "")), bool(d.get("start"))),
         "models": lambda d: engine.download_models(),
         "quit": lambda d: quit_cb(),
     }

@@ -13,8 +13,8 @@ function srgb8(y) {
   return Math.max(0, Math.min(255, Math.round(e * 255)));
 }
 
-function buildLut(gain, out) {
-  for (let v = 0; v < 256; v++) out[v] = srgb8(Math.pow(1 - Math.exp(-K * PRE[v] * gain), G));
+function buildLut(gain, offset, out) {
+  for (let v = 0; v < 256; v++) out[v] = srgb8(Math.pow(1 - Math.exp(-K * Math.max(0, PRE[v] * gain + offset)), G));
 }
 
 const lutR = new Uint8Array(256), lutG = new Uint8Array(256), lutB = new Uint8Array(256);
@@ -40,7 +40,7 @@ export class Thumbs {
 
   attach(id, canvas, onReady) {
     const it = { id, canvas, ctx: canvas.getContext("2d", { willReadFrequently: false }), src: null, url: null,
-                 cur: [1, 1, 1], from: [1, 1, 1], to: [1, 1, 1], t0: 0, visible: !this.io, dirty: false, onReady, out: null };
+                 cur: [1, 1, 1, 0, 0, 0], from: [1, 1, 1, 0, 0, 0], to: [1, 1, 1, 0, 0, 0], t0: 0, visible: !this.io, dirty: false, onReady, out: null };
     canvas.__thumb = it;
     this.items.set(id, it);
     if (this.io) this.io.observe(canvas);
@@ -91,14 +91,15 @@ export class Thumbs {
       .catch(() => viaImg(url, false));
   }
 
-  /** 게인 [r, g, b] (선형). animate 면 부드럽게 넘어간다. */
-  setGain(id, gain, animate = true) {
+  /** 게인 [r, g, b] 와 오프셋 [r, g, b] (선형. L' = gain·L + offset). animate 면 부드럽게 넘어간다. */
+  setGain(id, gain, offset = [0, 0, 0], animate = true) {
     const it = this.items.get(id);
     if (!it) return;
-    if (Math.abs(it.to[0] - gain[0]) < 1e-4 && Math.abs(it.to[1] - gain[1]) < 1e-4 && Math.abs(it.to[2] - gain[2]) < 1e-4) return;
-    it.to = gain.slice();
+    const to = [gain[0], gain[1], gain[2], offset[0], offset[1], offset[2]];
+    if (to.every((v, i) => Math.abs(it.to[i] - v) < (i < 3 ? 1e-4 : 1e-5))) return;
+    it.to = to;
     if (!animate || reduce || !it.visible || !it.src) {
-      it.cur = gain.slice();
+      it.cur = to.slice();
       this.anim.delete(it);
       it.dirty = true;
       if (it.visible) this._draw(it);
@@ -118,6 +119,7 @@ export class Thumbs {
       for (let c = 0; c < 3; c++) {
         // 스톱(로그) 단위로 보간해야 밝기가 고르게 넘어간다
         it.cur[c] = it.from[c] * Math.pow(it.to[c] / it.from[c], e);
+        it.cur[c + 3] = it.from[c + 3] + (it.to[c + 3] - it.from[c + 3]) * e;
       }
       this._draw(it, true);
       if (p >= 1) this.anim.delete(it);
@@ -128,7 +130,7 @@ export class Thumbs {
   _draw(it, force = false) {
     if (!it.src || !it.out) return;
     if (!it.visible && !force) { it.dirty = true; return; }
-    buildLut(it.cur[0], lutR); buildLut(it.cur[1], lutG); buildLut(it.cur[2], lutB);
+    buildLut(it.cur[0], it.cur[3], lutR); buildLut(it.cur[1], it.cur[4], lutG); buildLut(it.cur[2], it.cur[5], lutB);
     const s = it.src, o = it.out.data;
     for (let i = 0, n = s.length; i < n; i += 4) {
       o[i] = lutR[s[i]]; o[i + 1] = lutG[s[i + 1]]; o[i + 2] = lutB[s[i + 2]]; o[i + 3] = 255;

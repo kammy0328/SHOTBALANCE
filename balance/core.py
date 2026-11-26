@@ -252,8 +252,9 @@ class Engine:
             return SyntheticSource(shot)
         return VideoSource(cut["src_path"], cut.get("data_level"))
 
-    def _thumb_name(self, key: str, quick: bool) -> str:
-        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:18] + ("_q" if quick else "") + ".jpg"
+    def _thumb_name(self, key: str, kind: str = "") -> str:
+        """kind: "" 대표 프레임, "q" 분석 전 임시, "h" 컷의 첫 프레임, "t" 컷의 끝 프레임."""
+        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:18] + (f"_{kind}" if kind else "") + ".jpg"
 
     def _start_quick_thumbs(self) -> None:
         with self.lock:
@@ -271,7 +272,7 @@ class Engine:
                 with self._open(cut) as src:
                     _, code = src.read_fast((cut["src_in"] + cut["src_out"]) // 2, cut["src_in"], 480)
                 lin = spaces.to_dwg_linear(code, self._space_for(cut)[0])
-                name = self._thumb_name(key, True)
+                name = self._thumb_name(key, "q")
                 (self.cache / "thumbs" / name).write_bytes(preview.thumb_jpeg(lin))
                 with self.lock:
                     self.quick[key] = name
@@ -394,9 +395,10 @@ class Engine:
         elif manual and not todo:
             self._toast("이미 모두 적용돼 있습니다")
 
-    def goto(self, cut_id: str) -> None:
+    def goto(self, cut_id: str, at_start: bool = False) -> None:
+        """재생헤드를 컷 가운데로, at_start 면 컷이 시작하는 프레임(경계)으로."""
         if self.session is not None and self.store is not None and self.store.settings["follow_selection"]:
-            self.rworker.submit(self.session.goto, cut_id)
+            self.rworker.submit(self.session.goto, cut_id, at_start)
 
     # ================================================================ 그룹
     def _order(self, key: str) -> int:
@@ -577,12 +579,14 @@ class Engine:
             job["active"].append(key)
         self._bump(save=False)
         try:
-            a, thumb = analyze_clip(lambda: self._open(cut), cut["src_in"], cut["src_out"],
-                                    lambda g: self._space_for(cut, g)[0], self.faces, name=cut["src_name"],
-                                    cancel=lambda: job["cancel"])
-            name = self._thumb_name(key, False)
-            (self.cache / "thumbs" / name).write_bytes(thumb)
-            entry = {"a": a, "thumb": name, "t": int(time.time())}
+            a, thumbs = analyze_clip(lambda: self._open(cut), cut["src_in"], cut["src_out"],
+                                     lambda g: self._space_for(cut, g)[0], self.faces, name=cut["src_name"],
+                                     cancel=lambda: job["cancel"])
+            entry = {"a": a, "t": int(time.time())}
+            for kind, data in thumbs.items():
+                name = self._thumb_name(key, kind)
+                (self.cache / "thumbs" / name).write_bytes(data)
+                entry["thumb" + ("_" + kind if kind else "")] = name
         except Cancelled:
             entry = None
         except DecodeError as e:
@@ -818,6 +822,9 @@ class Engine:
                     "id": cut["id"], "key": k, "index": cut["index"], "name": cut["name"], "track": cut["track"],
                     "start": cut["start"], "dur": cut["dur"], "fps": cut["fps"], "group": gid,
                     "thumb": f"thumb/{thumb}?v={entry.get('t', 0) if entry.get('thumb') else 'q'}" if thumb else None,
+                    "thumb_head": f"thumb/{entry['thumb_h']}?v={entry.get('t', 0)}" if entry.get("thumb_h") else None,
+                    "thumb_tail": f"thumb/{entry['thumb_t']}?v={entry.get('t', 0)}" if entry.get("thumb_t") else None,
+                    "edge": (a.get("edges") if a and not stale else None),
                     "media_ok": cut["media_ok"], "media_note": cut.get("media_note") or entry.get("error"),
                     "node": cut.get("node_index") is not None, "retimed": bool(cut.get("retimed")),
                     "space": sid, "space_label": spaces.SPACES[sid].label, "space_source": ssrc, "space_warn": warn,

@@ -228,11 +228,11 @@ class ResolveSession:
                "Power": "1.0 1.0 1.0", "Saturation": "1.0"}
         return bool(_call(item, "SetCDL", cdl, default=False))
 
-    def goto(self, cut_id: str) -> bool:
+    def goto(self, cut_id: str, at_start: bool = False) -> bool:
         item = self._items.get(cut_id)
         if item is None or self._timeline is None:
             return False
         start = int(_call(item, "GetStart", default=0))
         dur = int(_call(item, "GetDuration", default=1) or 1)
-        tc = frames_to_tc(start + dur // 2, self._fps, self._drop)
+        tc = frames_to_tc(start if at_start else start + dur // 2, self._fps, self._drop)
         return bool(_call(self._timeline, "SetCurrentTimecode", tc, default=False))

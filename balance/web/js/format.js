@@ -24,6 +24,20 @@ export function dec(v, digits = 2) {
   return (v > 0 ? "+" : MINUS) + Math.abs(v).toFixed(digits);
 }
 
+/** 선형 오프셋을 화이트 대비 퍼센트로 (블랙/헤이즈 표시용) */
+export function pct(v, digits = 2) {
+  if (v == null || Number.isNaN(v)) return "";
+  const p = v * 100;
+  if (Math.abs(p) < 0.005) return "0";
+  return (p > 0 ? "+" : MINUS) + Math.abs(p).toFixed(digits) + "%";
+}
+
+export const BLACK_METHOD = {
+  ref: "이 그룹의 기준 블랙",
+  floor: "기준 컷의 블랙 플로어에 맞춤",
+  none: "잴 수 있는 블랙이 없습니다",
+};
+
 export const METHOD = {
   ref: "이 그룹의 기준 컷",
   median: "그룹 중앙값에 가장 가까운 컷",
@@ -60,6 +74,9 @@ export const NOTE = {
   ref_no_face: ["기준 컷에 얼굴이 없어 밝기 분포로 이었습니다", true],
   inherit: ["판단이 어려워 앞뒤 컷 값을 제안만 합니다", true],
   uncertain: ["밝기 분포가 기준 컷과 달라 확신이 낮습니다", true],
+  black_unsure: ["화면에 확실한 블랙이 없어 블랙 값은 제안만 합니다", false],
+  black_no_skin: ["스킨으로 이어진 컷이 아니라 블랙 값은 제안만 합니다", false],
+  black_large: ["블랙 차이가 커서 헤이즈가 아니라 피사체 차이로 봤습니다", true],
   clamped: ["보정량이 한계(±3 스톱)를 넘었습니다. 입력 색공간을 확인하세요", true],
 };
 

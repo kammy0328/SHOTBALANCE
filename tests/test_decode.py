@@ -83,7 +83,7 @@ def test_analyze_real_files_end_to_end(clips):
     from balance.analysis.clip import analyze_clip
     for name in ("prores422", "h264_tv_10"):
         a, thumb = analyze_clip(lambda: VideoSource(clips[name]), 2, 14, lambda g: "rec709_g24", None, name=name)
-        assert thumb[:2] == b"\xff\xd8" and a["frames"] >= 4
+        assert thumb[""][:2] == b"\xff\xd8" and a["frames"] >= 4
         assert a["source"]["codec"] in ("prores", "h264") and a["source"]["bits"] == 10
         assert a["temporal"]["kind"] in ("steady", "ramp", "wave")   # 아랫단 회색이 프레임마다 밝아지는 테스트 영상
         assert a["faces"] == [] and a["detector"] == "none"

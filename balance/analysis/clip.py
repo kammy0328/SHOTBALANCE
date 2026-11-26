@@ -71,7 +71,8 @@ def _box_iou(a, b) -> float:
 def analyze_clip(open_source: Callable, src_in: int, src_out: int,
                  resolve_space: Callable[[dict], str], engine: FaceEngine | None = None,
                  name: str = "", cancel: Callable[[], bool] | None = None) -> dict:
-    """측정 결과(dict, JSON 으로 저장 가능)와 썸네일 JPEG 바이트를 돌려준다.
+    """측정 결과(dict, JSON 으로 저장 가능)와 썸네일 JPEG 들을 돌려준다.
+    썸네일: {"": 대표 프레임, "h": 컷의 첫 프레임, "t": 컷의 끝 프레임}
 
     open_source()            → VideoSource 또는 같은 인터페이스의 객체
     resolve_space(추정결과)  → 이 컷에 쓸 입력 색공간 id
@@ -128,7 +129,21 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
         # 3) 썸네일: 컷 가운데에 가장 가까운 대표 프레임, 대표 레벨로 보정
         mid = (src_in + src_out) // 2
         ti = min(rep, key=lambda i: abs(i - mid))
-        thumb = preview.thumb_jpeg(lins[ti] * np.float32(2.0 ** offs[ti]))
+        thumbs = {"": preview.thumb_jpeg(lins[ti] * np.float32(2.0 ** offs[ti]))}
+
+        # 3-1) 컷의 첫 프레임과 끝 프레임 (경계 리뷰용). 찍힌 그대로 둔다: 대표 레벨로 옮기지 않는다
+        edges = {}
+        for tag, idx in (("h", src_in), ("t", max(src_in, src_out - 1))):
+            check()
+            if idx in codes:
+                code_e = codes[idx]
+            elif tag == "t" and fast:
+                _, code_e = src.read_fast(idx, src_in, STAT_SIDE)      # 롱GOP 는 끝에 가장 가까운 키프레임
+            else:
+                code_e = src.read(idx, STAT_SIDE)
+            lin_e = spaces.to_dwg_linear(code_e, space)
+            thumbs[tag] = preview.thumb_jpeg(lin_e)
+            edges[tag] = round(float(measure.frame_stats(lin_e, code_e)["level"] - tmp["rep"]), 3)
         del codes
 
         # 4) 얼굴 · 스킨
@@ -177,10 +192,10 @@ def analyze_clip(open_source: Callable, src_in: int, src_out: int,
         return dict(
             version=ANALYSIS_VERSION, space=space, guess=g, signal=sig,
             temporal=dict(kind=tmp["kind"], spread=tmp["spread"], rep=round(tmp["rep"], 4)),
-            stats=merged, faces=faces, detector=detector, frames=len(order),
+            stats=merged, faces=faces, detector=detector, frames=len(order), edges=edges,
             source=dict(codec=info.codec, pix_fmt=info.pix_fmt, bits=info.bits, width=info.width,
                         height=info.height, fps=round(info.fps, 3), range=info.range_flag,
                         matrix=info.matrix_flag, n_frames=n_total),
-        ), thumb
+        ), thumbs
     finally:
         src.close()

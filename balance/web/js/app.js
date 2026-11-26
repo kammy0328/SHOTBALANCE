@@ -11,6 +11,7 @@ const flash = (el, cls, ms = 700) => { el.classList.remove(cls); void el.offsetW
 
 const ui = {
   st: null, sel: new Set(), anchor: null, filter: "all", scope: "cut", compare: false, size: "m",
+  view: "cut", sort: "time", edge: null, pairs: new Map(), pairList: [],
   cards: new Map(), chips: new Map(), byId: new Map(), groups: new Map(),
   entered: false, hadJob: false, railSig: "", lastValue: null, lastTarget: "", pop: null,
 };
@@ -65,7 +66,6 @@ function apply(st) {
   render();
 }
 
-const gainOf = (t) => { const e = Math.pow(2, t.exp); return [e * t.wb[0], e * t.wb[1], e * t.wb[2]]; };
 const inFilter = (c) => ui.filter === "all" || (ui.filter === "none" ? !c.group : c.group === ui.filter);
 const visibleCuts = () => ui.st.cuts.filter(inFilter);
 const selCuts = () => ui.st.cuts.filter((c) => ui.sel.has(c.id));
@@ -91,7 +91,7 @@ function render() {
   renderBar();
   renderRail();
   renderEmpty();
-  renderGrid();
+  if (ui.view === "edge") renderPairs(); else renderGrid();
   renderWedge();
   renderMeter();
   if (!ui.entered && ui.st.cuts.length) {
@@ -186,7 +186,8 @@ function renderEmpty() {
       <div class="empty-actions"><button class="btn is-solid" data-do="rescan">타임라인 다시 읽기</button></div>`;
   }
   box.hidden = !html;
-  grid.hidden = !!html;
+  grid.hidden = !!html || ui.view === "edge";
+  $("#bgrid").hidden = !!html || ui.view !== "edge";
   $(".sheet-head").hidden = !!html;
   if (html && box.dataset.sig !== html) { box.innerHTML = html; box.dataset.sig = html; }
 
@@ -266,7 +267,8 @@ function renderGrid() {
 
     // 썸네일
     thumbs.setSource(c.id, c.thumb);
-    thumbs.setGain(c.id, ui.compare ? [1, 1, 1] : gainOf(c.total), card.ready);
+    if (ui.compare) thumbs.setGain(c.id, [1, 1, 1], [0, 0, 0], card.ready);
+    else thumbs.setGain(c.id, c.total.slope, c.total.offset, card.ready);
 
     // 표식
     const tags = [];
@@ -294,6 +296,131 @@ function renderGrid() {
   const g = ui.groups.get(ui.filter);
   $("#sheet-title").textContent = g ? g.name : ui.filter === "none" ? "미지정" : "전체";
   $("#sheet-count").textContent = vis ? `${vis}컷` : "";
+}
+
+/* ────────────────────────────────────────────────────── 경계 리뷰 */
+// 맞춘 뒤에 남는 노출 차이: 자동값을 그대로 쓰고 의도가 없으면 0 이다
+const resid = (c) => (hasAuto(c) ? c.total.exp - c.auto.exp : null);
+
+function buildPairs() {
+  const byGroup = new Map();
+  for (const c of ui.st.cuts) {
+    if (!c.group || (ui.filter !== "all" && ui.filter !== c.group)) continue;
+    if (!byGroup.has(c.group)) byGroup.set(c.group, []);
+    byGroup.get(c.group).push(c);
+  }
+  const out = [];
+  for (const list of byGroup.values()) {
+    for (let i = 0; i + 1 < list.length; i++) {
+      const a = list[i], b = list[i + 1], ra = resid(a), rb = resid(b);
+      // 컷 안에서 노출이 변하는 컷은 끝 프레임이 대표값과 다르다
+      const ea = a.kind === "ramp" && a.edge ? a.edge.t : 0, eb = b.kind === "ramp" && b.edge ? b.edge.h : 0;
+      const jump = ra === null || rb === null ? null : rb + eb - (ra + ea);
+      // 확인 우선순위: 사람이 일부러 뺀 컷은 뒤로, 판단이 덜 끝난 컷은 앞으로
+      let risk = jump === null ? 0 : Math.abs(jump) / 0.15, note = "";
+      for (const [c, side] of [[a, "앞"], [b, "뒤"]]) {
+        if (isSuggestion(c)) { risk += 2; note = note || `<span class="t-warn">${icon("i-ring")}</span><span>${side} 컷은 적용하지 않은 제안값</span>`; }
+        else if (c.space_warn) { risk += 2; note = note || `<span class="t-warn">${icon("i-warn")}</span><span>${side} 컷 입력 색공간 확인</span>`; }
+        else if (c.excluded) { risk += 0.1; note = note || `<span>${side} 컷은 매칭에서 제외</span>`; }
+        else if (!c.analyzed) { risk += 1.5; note = note || `<span>${side} 컷은 아직 분석 전</span>`; }
+        if (c.kind && F.KIND_ICON[c.kind]) { risk += 0.6; note = note || `${icon(F.KIND_ICON[c.kind])}<span>${side} 컷 ${F.KIND_LABEL[c.kind]}</span>`; }
+        if (hasAuto(c) && c.auto.exp_conf === "medium") risk += 0.3;
+      }
+      const gap = b.index - a.index - 1;
+      if (!note && gap > 0) note = `<span>사이에 다른 컷 ${gap}개</span>`;
+      out.push({ key: a.id + "|" + b.id, a, b, gap, jump, risk, note });
+    }
+  }
+  out.sort(ui.sort === "risk" ? (x, y) => y.risk - x.risk || x.b.index - y.b.index : (x, y) => x.b.index - y.b.index);
+  return out;
+}
+
+function makePair(pr) {
+  const el = h("article", "pair");
+  el.dataset.key = pr.key;
+  el.innerHTML = `<div class="pair-frames"><div class="pf" data-side="a"><canvas width="320" height="180"></canvas><span class="pf-no"></span></div>` +
+    `<div class="pf" data-side="b"><canvas width="320" height="180"></canvas><span class="pf-no"></span></div><i class="pair-seam"></i></div>` +
+    `<div class="pair-cap"><span class="cap-no"></span><span class="pair-note"></span><span class="pair-jump"></span></div>`;
+  const [fa, fb] = $$(".pf", el);
+  const p = { el, fa, fb, no: $(".pair-cap .cap-no", el), note: $(".pair-note", el), jump: $(".pair-jump", el), ready: [false, false], sig: "" };
+  thumbs.attach(pr.key + ":a", $("canvas", fa), () => { fa.classList.add("has-thumb"); p.ready[0] = true; });
+  thumbs.attach(pr.key + ":b", $("canvas", fb), () => { fb.classList.add("has-thumb"); p.ready[1] = true; });
+  return p;
+}
+
+function renderPairs() {
+  const box = $("#bgrid"), list = (ui.pairList = buildPairs());
+  box.dataset.size = ui.size;
+  const seen = new Set();
+  let prevEl = null, i = 0;
+  for (const pr of list) {
+    let p = ui.pairs.get(pr.key);
+    if (!p) { p = makePair(pr); ui.pairs.set(pr.key, p); }
+    if (p.el.parentNode !== box || p.el.previousElementSibling !== prevEl) box.insertBefore(p.el, prevEl ? prevEl.nextSibling : box.firstChild);
+    prevEl = p.el;
+    seen.add(pr.key);
+    p.el.style.setProperty("--i", Math.min(i++, 30));
+    p.el.classList.toggle("is-far", pr.gap > 0);
+    const g = ui.groups.get(pr.a.group);
+    p.fa.style.setProperty("--gc", g ? g.color : "transparent");
+    for (const [f, c, side, url, k] of [[p.fa, pr.a, "a", pr.a.thumb_tail, 0], [p.fb, pr.b, "b", pr.b.thumb_head, 1]]) {
+      thumbs.setSource(pr.key + ":" + side, url || c.thumb);
+      if (ui.compare) thumbs.setGain(pr.key + ":" + side, [1, 1, 1], [0, 0, 0], p.ready[k]);
+      else thumbs.setGain(pr.key + ":" + side, c.total.slope, c.total.offset, p.ready[k]);
+      f.classList.toggle("is-approx", !url);
+      f.classList.toggle("is-selected", ui.sel.has(c.id));
+      f.title = `${F.pad2(c.index)}  ${c.name}` + (url ? (side === "a" ? "  (끝 프레임)" : "  (첫 프레임)") : "  (분석 전이라 컷 가운데 프레임)");
+      $(".pf-no", f).textContent = F.pad2(c.index);
+    }
+    const sig = `${pr.a.index}|${pr.b.index}|${pr.note}|${pr.jump}`;
+    if (sig !== p.sig) {
+      p.sig = sig;
+      p.no.textContent = `${F.pad2(pr.a.index)} → ${F.pad2(pr.b.index)}`;
+      p.note.innerHTML = pr.note;
+      const z = pr.jump === null || Math.abs(pr.jump) < 0.05;
+      p.jump.textContent = pr.jump === null ? "" : z ? "0" : F.dec(pr.jump);
+      p.jump.classList.toggle("is-zero", z);
+      p.jump.title = pr.jump === null ? "" : "이 경계에서 예상되는 노출 차이 (스톱). 자동값을 그대로 쓰면 0 입니다";
+    }
+  }
+  for (const [key, p] of ui.pairs) if (!seen.has(key)) { p.el.remove(); thumbs.detach(key + ":a"); thumbs.detach(key + ":b"); ui.pairs.delete(key); }
+  let empty = $(".bgrid-empty", box);
+  if (!list.length) {
+    if (!empty) box.append((empty = h("div", "bgrid-empty")));
+    empty.innerHTML = "같은 그룹 안에서 이어지는 컷 사이에 경계가 생깁니다.<br>먼저 컷을 그룹으로 묶어 주세요.";
+  } else if (empty) empty.remove();
+  const g = ui.groups.get(ui.filter);
+  $("#sheet-title").textContent = g ? g.name : "전체";
+  $("#sheet-count").textContent = list.length ? `경계 ${list.length}곳` : "";
+}
+
+function setView(v) {
+  if (ui.view === v) return;
+  ui.view = v;
+  ui.edge = null;
+  $$("#seg-view button").forEach((x) => x.classList.toggle("is-on", x.dataset.v === v));
+  $("#seg-sort").hidden = v !== "edge";
+  if (v === "edge" && ui.filter === "none") ui.filter = "all";
+  ui.railSig = "";
+  render();
+}
+
+function selectSide(key, side) {
+  const pr = ui.pairList.find((x) => x.key === key);
+  if (!pr) return;
+  ui.edge = { key, side };
+  ui.sel = new Set([pr[side].id]);
+  ui.anchor = pr[side].id;
+  afterSelect();
+}
+
+function movePair(dir) {
+  const list = ui.pairList;
+  if (!list.length) return;
+  const cur = ui.edge ? list.findIndex((x) => x.key === ui.edge.key) : -1;
+  const next = list[cur < 0 ? (dir > 0 ? 0 : list.length - 1) : clamp(cur + dir, 0, list.length - 1)];
+  selectSide(next.key, ui.edge ? ui.edge.side : "b");
+  ui.pairs.get(next.key)?.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 function renderWedge() {
@@ -435,6 +562,7 @@ function renderMeter() {
   // 세 층
   $("#m-layers").hidden = false;
   $("#layer-auto").hidden = groupMode || !one;
+  $("#layer-black").hidden = groupMode || !one || !(st.settings.black_enabled && st.settings.apply_mode === "linear_gain");
   $("#layer-group").hidden = !groupMode && !one;
   $("#layer-cut").hidden = groupMode;
   if (groupMode) {
@@ -454,6 +582,18 @@ function renderMeter() {
     else if (!has) note = one.analyzed ? "" : "아직 분석하지 않았습니다";
     else note = `<i class="conf" data-c="${a.exp_conf}" title="${F.CONF[a.exp_conf]}"></i><span>${F.METHOD[a.method] || ""}${one.total.use_exp ? "" : " (적용 안 함)"}</span>`;
     $("#auto-note").innerHTML = note;
+    // 블랙/헤이즈
+    const hasBlack = has && ["ref", "floor"].includes(a.black_method);
+    setLayer("black", hasBlack ? a.black * 100 : 0, { off: !one.total.use_black, text: hasBlack ? F.pct(a.black) : "–" });
+    const sb = $("#sw-black");
+    sb.setAttribute("aria-checked", String(!!one.total.use_black));
+    sb.disabled = !hasBlack || one.excluded || one.locked || a.black_method === "ref" || !one.total.use_exp;
+    let bn = "";
+    if (hasBlack && !one.locked && !one.excluded) {
+      const text = a.black_method === "ref" ? F.BLACK_METHOD.ref : Math.abs(a.black) < 1e-5 ? "블랙이 이미 맞아 있습니다" : F.BLACK_METHOD.floor;
+      bn = `<i class="conf" data-c="${a.black_conf}" title="${F.CONF[a.black_conf]}"></i><span>${text}${one.total.use_black || a.black_method === "ref" ? "" : " (적용 안 함)"}</span>`;
+    } else if (has && !one.locked && !one.excluded) bn = `<span>${F.BLACK_METHOD.none}</span>`;
+    $("#black-note").innerHTML = bn;
     setLayer("group", one.total.group_exp);
     setLayer("cut", one.total.cut_exp);
   } else {
@@ -590,7 +730,9 @@ function afterSelect() {
   clearTimeout(gotoTimer);
   if (ui.sel.size === 1 && !api.demo) {
     const id = [...ui.sel][0];
-    gotoTimer = setTimeout(() => api.post("goto", { id }).catch(() => {}), 160);
+    const pr = ui.view === "edge" && ui.edge ? ui.pairList.find((x) => x.key === ui.edge.key) : null;
+    const body = pr ? { id: pr.b.id, start: true } : { id };     // 경계에서는 컷이 바뀌는 프레임으로
+    gotoTimer = setTimeout(() => api.post("goto", body).catch(() => {}), 160);
   }
 }
 
@@ -608,10 +750,12 @@ function setFilter(f) {
   ui.filter = f;
   ui.sel.clear();
   ui.anchor = null;
+  ui.edge = null;
   ui.scope = "cut";
   ui.railSig = "";
   render();
   $("#grid").scrollTop = 0;
+  $("#bgrid").scrollTop = 0;
 }
 
 function toggleFlag(name) {
@@ -675,6 +819,7 @@ function settingsPop() {
       <select data-set="apply_mode"><option value="linear_gain">Linear Gain</option><option value="di_offset">Offset</option></select></label>
     <div class="pop-row"><span>값이 바뀌면 바로 Resolve 에 쓰기</span>${sw("auto_apply", s.auto_apply)}</div>
     <div class="pop-row"><span>화이트밸런스도 맞추기</span>${sw("wb_enabled", s.wb_enabled)}</div>
+    <div class="pop-row"><span>블랙/헤이즈도 맞추기<small>Linear Gain 방식에서만 동작합니다</small></span>${sw("black_enabled", s.black_enabled)}</div>
     <div class="pop-row"><span>신뢰도 낮은 값도 적용<small>끄면 제안만 하고 사람이 고릅니다</small></span>${sw("apply_low", s.apply_low)}</div>
     <div class="pop-row"><span>컷을 고르면 Resolve 재생헤드 이동</span>${sw("follow_selection", s.follow_selection)}</div>
     <label class="pop-row"><span>로그 소스 기본 입력<small>Resolve 에 입력 색공간이 지정돼 있지 않을 때</small></span>
@@ -715,6 +860,7 @@ function helpPop() {
     ${row(["G"], "선택한 컷으로 그룹 만들기")}
     ${row(["0"], "의도 값 지우기")}
     ${row(["A"], "자동 매칭")}
+    ${row(["B"], "경계 리뷰: 컷이 바뀌는 지점의 앞뒤 프레임 보기")}
     ${row(["\\"], "누르고 있는 동안 촬영본 보기")}
     ${row(["Ctrl", "Z"], "되돌리기. Shift 를 더하면 다시 실행")}
   </div>`);
@@ -811,17 +957,31 @@ function wire() {
   });
 
   // 보기 옵션
+  const redraw = () => (ui.view === "edge" ? renderPairs() : renderGrid());
   $("#seg-compare").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
     ui.compare = b.dataset.v === "before";
     $$("#seg-compare button").forEach((x) => x.classList.toggle("is-on", x === b));
-    renderGrid();
+    redraw();
   });
   $("#seg-size").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
     ui.size = b.dataset.v;
     $$("#seg-size button").forEach((x) => x.classList.toggle("is-on", x === b));
-    renderGrid();
+    redraw();
+  });
+  $("#seg-view").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setView(b.dataset.v); });
+  $("#seg-sort").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    ui.sort = b.dataset.v;
+    $$("#seg-sort button").forEach((x) => x.classList.toggle("is-on", x === b));
+    renderPairs();
+    $("#bgrid").scrollTop = 0;
+  });
+  $("#bgrid").addEventListener("click", (e) => {
+    const f = e.target.closest(".pf");
+    if (f) selectSide(f.closest(".pair").dataset.key, f.dataset.side);
+    else if (ui.sel.size) { ui.sel.clear(); ui.edge = null; afterSelect(); }
   });
 
   // 노출 패널
@@ -835,6 +995,7 @@ function wire() {
   $$(".wb-btn").forEach((b) => hold(b, () => intent(b.dataset.temp ? { temp: +b.dataset.temp } : { tint: +b.dataset.tint })));
   $("#sw-auto").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_exp: !c.total.use_exp }); });
   $("#sw-wb").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_wb: !c.total.use_wb }); });
+  $("#sw-black").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_black: !c.total.use_black }); });
   $("#btn-reset-intent").addEventListener("click", () => intent({ reset: true }));
   $("#act-ref").addEventListener("click", () => toggleFlag("ref"));
   $("#act-lock").addEventListener("click", () => toggleFlag("locked"));
@@ -872,12 +1033,12 @@ function wire() {
     if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); return act("redo"); }
     if (mod && e.key.toLowerCase() === "a") { e.preventDefault(); ui.sel = new Set(visibleCuts().map((c) => c.id)); return afterSelect(); }
     switch (e.key) {
-      case "ArrowRight": e.preventDefault(); return move(1, e);
-      case "ArrowLeft": e.preventDefault(); return move(-1, e);
+      case "ArrowRight": e.preventDefault(); return ui.view === "edge" ? movePair(1) : move(1, e);
+      case "ArrowLeft": e.preventDefault(); return ui.view === "edge" ? movePair(-1) : move(-1, e);
       case "ArrowUp": case "+": case "=": e.preventDefault(); return nudge(1, e);
       case "ArrowDown": case "-": case "_": e.preventDefault(); return nudge(-1, e);
       case "Tab": if (mode() !== "none" && activeGroup() && ui.sel.size) { e.preventDefault(); ui.scope = ui.scope === "cut" ? "group" : "cut"; renderMeter(); } return;
-      case "\\": if (!ui.compare) { ui.compare = true; $$("#seg-compare button").forEach((x) => x.classList.toggle("is-on", x.dataset.v === "before")); renderGrid(); } return;
+      case "\\": if (!ui.compare) { ui.compare = true; $$("#seg-compare button").forEach((x) => x.classList.toggle("is-on", x.dataset.v === "before")); ui.view === "edge" ? renderPairs() : renderGrid(); } return;
       case "?": return openPop($("#btn-help"), helpPop(), "help");
     }
     if (mod || e.altKey) return;
@@ -886,6 +1047,7 @@ function wire() {
       case "l": return toggleFlag("locked");
       case "x": return toggleFlag("excluded");
       case "g": return newGroup();
+      case "b": return setView(ui.view === "edge" ? "cut" : "edge");
       case "0": return intent({ reset: true });
       case "a": return ui.st.job ? null : act("analyze", {});
     }
@@ -894,7 +1056,7 @@ function wire() {
     if (e.key === "\\" && ui.compare) {
       ui.compare = false;
       $$("#seg-compare button").forEach((x) => x.classList.toggle("is-on", x.dataset.v === "after"));
-      renderGrid();
+      ui.view === "edge" ? renderPairs() : renderGrid();
     }
   });
 }

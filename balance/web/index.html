@@ -56,6 +56,14 @@
     <div class="sheet-head">
       <h1 class="sheet-title"><span id="sheet-title">전체</span> <span class="sheet-count" id="sheet-count"></span></h1>
       <div class="sheet-tools">
+        <div class="seg" id="seg-sort" role="group" aria-label="경계 정렬" hidden>
+          <button data-v="time" class="is-on" title="타임라인 순서">순서대로</button>
+          <button data-v="risk" title="한쪽이 제안값이거나 신뢰도가 낮은 경계부터">확인할 곳부터</button>
+        </div>
+        <div class="seg" id="seg-view" role="group" aria-label="보기">
+          <button data-v="cut" class="is-on" title="컷 보기">컷</button>
+          <button data-v="edge" title="컷이 바뀌는 지점의 앞뒤 프레임을 나란히 봅니다 (B)">경계</button>
+        </div>
         <div class="seg" id="seg-compare" role="group" aria-label="미리보기">
           <button data-v="after" class="is-on" title="보정 후 미리보기">보정 후</button>
           <button data-v="before" title="촬영본 그대로 (\ 누르고 있기)">촬영본</button>
@@ -69,6 +77,7 @@
     </div>
     <div class="notice" id="notice" hidden></div>
     <div class="grid" id="grid" data-size="m"></div>
+    <div class="bgrid" id="bgrid" data-size="m" hidden></div>
     <div class="empty" id="empty" hidden></div>
   </main>
 
@@ -117,6 +126,13 @@
           <span class="layer-val num" id="lv-auto">0</span>
           <button class="switch" id="sw-auto" role="switch" aria-checked="true" aria-label="자동 매칭값 사용"><i></i></button>
           <div class="layer-note" id="auto-note"></div>
+        </div>
+        <div class="layer" id="layer-black">
+          <span class="layer-name">블랙</span>
+          <span class="layer-bar"><i></i></span>
+          <span class="layer-val num" id="lv-black">0</span>
+          <button class="switch" id="sw-black" role="switch" aria-checked="true" aria-label="블랙 맞춤 사용"><i></i></button>
+          <div class="layer-note" id="black-note"></div>
         </div>
         <div class="layer" id="layer-group">
           <span class="layer-name">그룹 의도</span>

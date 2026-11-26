@@ -45,8 +45,12 @@ def make_frames(w: int = W, h: int = H, n: int = N) -> np.ndarray:
 
 TAG709 = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
 
-# prores_ks 는 프레임 속성에서 태그를 읽으므로 필터로 심어 준다
+# 원시 YUV 입력에는 색 정보가 없다. 필터 그래프 맨 앞에서 실제 값(매트릭스 · 레인지)을 심어 준다.
+# 이렇게 하지 않으면 FFmpeg 7 은 출력에 요청한 색공간으로 '변환'을 해 버려서 값이 달라진다.
+# (prores_ks 도 프레임 속성에서 태그를 읽는다)
 SET709 = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+SET709_FULL = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=pc"
+SET2020 = "setparams=colorspace=bt2020nc:color_primaries=bt2020:color_trc=bt709:range=tv"
 
 # name: (K 가중치, legal?, 비트, 입력 pix_fmt, 필터, 코덱 인자, 확장자)
 VARIANTS = {
@@ -54,11 +58,11 @@ VARIANTS = {
                   ["-c:v", "prores_ks", "-profile:v", "3", *TAG709], "mov"),
     "prores4444": ("ITU-R BT.709", True, 10, "yuv444p10le", SET709,
                    ["-c:v", "prores_ks", "-profile:v", "4", *TAG709], "mov"),
-    "h264_full": ("ITU-R BT.709", False, 8, "yuvj444p", "format=yuvj420p",
+    "h264_full": ("ITU-R BT.709", False, 8, "yuvj444p", SET709_FULL + ",format=yuvj420p",
                   ["-c:v", "libx264", "-qp", "0", "-g", "12", "-bf", "2", "-colorspace", "bt709", "-color_range", "pc"], "mp4"),
-    "h264_tv_10": ("ITU-R BT.709", True, 10, "yuv444p10le", "format=yuv422p10le",
+    "h264_tv_10": ("ITU-R BT.709", True, 10, "yuv444p10le", SET709 + ",format=yuv422p10le",
                    ["-c:v", "libx264", "-qp", "0", "-g", "12", "-bf", "2", "-colorspace", "bt709", "-color_range", "tv"], "mp4"),
-    "hevc_2020": ("ITU-R BT.2020", True, 10, "yuv444p10le", "format=yuv420p10le",
+    "hevc_2020": ("ITU-R BT.2020", True, 10, "yuv444p10le", SET2020 + ",format=yuv420p10le",
                   ["-c:v", "libx265", "-x265-params", "lossless=1:log-level=error", "-colorspace", "bt2020nc", "-color_range", "tv"], "mp4"),
     # 태그 없는 파일: SD 크기는 601, HD 이상은 709 로 읽어야 한다
     "untagged_sd": ("ITU-R BT.601", True, 8, "yuv444p", "format=yuv420p",

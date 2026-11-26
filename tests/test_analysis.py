@@ -15,7 +15,8 @@ def analyses():
     for k, (shot, grp, isref, dur) in enumerate(DEMO):
         a, thumb = analyze_clip(lambda s=shot: SyntheticSource(s), 10, 10 + dur,
                                 lambda g, s=shot: s.tagged or s.space, None, name=shot.name)
-        assert thumb[:2] == b"\xff\xd8"
+        assert set(thumb) == {"", "h", "t"} and all(v[:2] == b"\xff\xd8" for v in thumb.values())
+        assert set(a["edges"]) == {"h", "t"}
         out[k] = a
     return out
 
