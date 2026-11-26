@@ -85,7 +85,7 @@ def main():
     truth = {}
     for c in after["cuts"]:
         s = shots[c["name"]]
-        truth[c["key"]] = {"exp": s.cam_stops, "wb": list(s.cam_wb), "space": s.space, "flare": list(s.flare),
+        truth[c["key"]] = {"exp": s.cam_stops, "wb": list(s.cam_wb), "space": s.space, "flare": list(s.flare), "sat": s.cam_sat,
                            "idents": [f.ident for f in s.figures]}
 
     data = {"before": fix(before), "after": fix(after), "truth": truth, "meta": meta}

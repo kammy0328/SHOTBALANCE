@@ -410,6 +410,9 @@ def test_sync_other_timeline(eng):
         slope, offset = cdl(item)
         t = main[item.shot.name]["total"]
         assert np.allclose(slope, t["slope"], atol=1e-5) and np.allclose(offset, t["offset"], atol=1e-5), item.shot.name
+    assert teaser.items[2].shot.name.startswith("B002C004")
+    assert teaser.items[2].graph.luts.get(2) == lut_of(eng, main["B002C004_241102_R2CD"]["id"]) != ""     # 채도 LUT 도 같이
+    assert teaser.items[0].graph.luts.get(2, "") == ""
     assert teaser.items[5].cdl is None              # EXPOSURE 노드가 없는 컷
     assert teaser.items[6].cdl is None              # 본편에서 쓰지 않은 구간
     toast = next(e for e in eng.events[n_events:] if e.get("type") == "toast")

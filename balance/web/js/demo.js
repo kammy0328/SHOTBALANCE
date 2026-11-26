@@ -5,7 +5,7 @@
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const W = [0.25, 0.6, 0.15];
 const COLORS = ["#d98b4a", "#5fa8a0", "#b9a44c", "#8f7fc4", "#c96f7e", "#6f9fd1", "#8fb267", "#c58fb8"];
-const zero = () => ({ exp: 0, temp: 0, tint: 0 });
+const zero = () => ({ exp: 0, temp: 0, tint: 0, sat: 0 });
 const r4 = (v) => Math.round(v * 1e4) / 1e4;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -46,7 +46,7 @@ export class DemoApi {
   }
 
   total(c) {
-    if (c.locked && c.frozen) return { ...c.frozen, auto_exp: 0, group_exp: 0, cut_exp: 0, use_exp: false, use_wb: false, use_black: false, locked: true };
+    if (c.locked && c.frozen) return { ...c.frozen, auto_exp: 0, group_exp: 0, cut_exp: 0, use_exp: false, use_wb: false, use_black: false, use_sat: false, locked: true };
     const g = this.s.groups.find((x) => x.id === c.group), gi = g ? g.intent : zero(), ci = c.intent, st = this.s.settings, a = c.auto;
     const valid = !!a && !c.excluded && !["none", "excluded"].includes(a.method);
     const useExp = valid && (c.use_exp ?? (a.exp_apply || st.apply_low));
@@ -58,9 +58,12 @@ export class DemoApi {
     const wi = this.wbIntent(gi.temp + ci.temp, gi.tint + ci.tint);
     const exp = aExp + gi.exp + ci.exp, wb = aWb.map((v, i) => v * wi[i]);
     const k = useBlack ? a.black_k : [1, 1, 1], ig = 2 ** (gi.exp + ci.exp);
-    return { exp: r4(exp), wb, slope: wb.map((v, i) => 2 ** exp * v * k[i]), offset: (useBlack ? a.black_o : [0, 0, 0]).map((v) => v * ig),
-             black: useBlack ? a.black : 0, auto_exp: r4(aExp), group_exp: gi.exp, cut_exp: ci.exp,
-             use_exp: !!useExp, use_wb: !!useWb, use_black: useBlack, locked: false };
+    const useSat = !!(valid && ["ref", "camera"].includes(a.sat_method) && useExp && st.sat_enabled && (c.use_sat ?? (a.sat_apply || st.apply_low)));
+    const sk = useSat && useWb ? a.sat_k : [1, 1, 1];
+    const sat = Math.max(0.4, Math.min(1.8, 2 ** ((gi.sat || 0) + (ci.sat || 0)) * (useSat ? a.sat : 1)));
+    return { exp: r4(exp), wb, slope: wb.map((v, i) => 2 ** exp * v * k[i] * sk[i]), offset: (useBlack ? a.black_o : [0, 0, 0]).map((v) => v * ig),
+             black: useBlack ? a.black : 0, sat: r4(sat), auto_exp: r4(aExp), group_exp: gi.exp, cut_exp: ci.exp,
+             use_exp: !!useExp, use_wb: !!useWb, use_black: useBlack, use_sat: useSat, locked: false };
   }
 
   retotal() {
@@ -102,10 +105,18 @@ export class DemoApi {
       base = [0, 1, 2].map((i) => { const v = ns.map((n) => n[i]).sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; });
     }
     g.identities = new Set(live.flatMap((c) => this.d.truth[c.key].idents)).size;
+    const ag = this.d.after.groups.find((x) => x.id === gid);
+    if (same && ag) { g.cameras = ag.cameras; g.cameras_by = ag.cameras_by; }
+    else {
+      const names = ref ? [ref.name[0], ...live.map((c) => c.name[0])] : [];
+      g.cameras = [...new Set(names)].map((l, i) => ({ id: "ABCDEFGH"[i], n: live.filter((c) => c.name[0] === l).length, ref: i === 0, conf: "none", sat: 1 }));
+      g.cameras_by = "meta";
+    }
     for (const c of members) {
       const a0 = this.after.get(c.key), t = this.d.truth[c.key];
       if (!c.analyzed || c.stale) { c.auto = null; continue; }
-      const noBlack = { black: 0, black_k: [1, 1, 1], black_o: [0, 0, 0], black_conf: "low", black_method: "none", black_apply: false };
+      const noBlack = { black: 0, black_k: [1, 1, 1], black_o: [0, 0, 0], black_conf: "low", black_method: "none", black_apply: false,
+                        sat: 1, sat_k: [1, 1, 1], sat_conf: "low", sat_method: "none", sat_apply: false, cam: "" };
       if (c.excluded) { c.auto = { exp: 0, wb: [1, 1, 1], exp_conf: "low", wb_conf: "low", method: "excluded", wb_method: "none", notes: ["excluded"], exp_apply: false, wb_apply: false, ...noBlack }; continue; }
       const wrongSpace = t.space !== c.space;
       if ((same && a0 && a0.auto && a0.space === c.space && a0.auto.method !== "excluded") || (wrongSpace && a0 && a0.auto && a0.auto.method !== "excluded")) {
@@ -132,6 +143,15 @@ export class DemoApi {
           black = { black: o[0] * W[0] + o[1] * W[1] + o[2] * W[2], black_k: [1, 1, 1], black_o: o, black_conf: faces ? conf : "low",
                     black_method: "floor", black_apply: faces };
         }
+      }
+      // 채도: 릴 이름의 카메라 글자로 묶고, 합성 영상의 카메라별 채도 응답으로 계산한다
+      if (ref) {
+        const letter = (x) => x.name[0], rl = letter(ref), same = letter(c) === rl;
+        const n = live.filter((x) => letter(x) === letter(c)).length;
+        const cams = [...new Set([rl, ...live.map(letter)])];
+        const sat = this.d.truth[ref.key].sat / t.sat;
+        black = { ...black, cam: "ABCDEFGH"[cams.indexOf(letter(c))] || "", sat: same ? 1 : r4(sat), sat_k: [1, 1, 1],
+                  sat_method: same ? "ref" : "camera", sat_conf: same ? "high" : n >= 2 ? "medium" : "low", sat_apply: same || n >= 2 };
       }
       c.auto = isRef
         ? { exp: 0, wb: [1, 1, 1], exp_conf: "high", wb_conf: "high", method: "ref", wb_method: "ref", notes, exp_apply: true, wb_apply: true, ...black }
@@ -174,7 +194,7 @@ export class DemoApi {
   }
 
   // ───────────────────────────── 되돌리기
-  snap() { return clone({ groups: this.s.groups, cuts: this.s.cuts.map((c) => ({ key: c.key, group: c.group, intent: c.intent, auto: c.auto, locked: c.locked, frozen: c.frozen || null, excluded: c.excluded, use_exp: c.use_exp, use_wb: c.use_wb, use_black: c.use_black })) }); }
+  snap() { return clone({ groups: this.s.groups, cuts: this.s.cuts.map((c) => ({ key: c.key, group: c.group, intent: c.intent, auto: c.auto, locked: c.locked, frozen: c.frozen || null, excluded: c.excluded, use_exp: c.use_exp, use_wb: c.use_wb, use_black: c.use_black, use_sat: c.use_sat })) }); }
   remember() { this.undoStack.push(this.snap()); if (this.undoStack.length > 60) this.undoStack.shift(); this.redoStack = []; }
   restore(sn) {
     this.s.groups = sn.groups;
@@ -215,7 +235,10 @@ export class DemoApi {
         this.remember();
         for (const it of targets) {
           if (b.reset) Object.assign(it, zero());
-          else { it.exp = r4(Math.max(-6, Math.min(6, it.exp + (b.exp || 0)))); it.temp = r4(it.temp + (b.temp || 0)); it.tint = r4(it.tint + (b.tint || 0)); }
+          else {
+            it.exp = r4(Math.max(-6, Math.min(6, it.exp + (b.exp || 0)))); it.temp = r4(it.temp + (b.temp || 0)); it.tint = r4(it.tint + (b.tint || 0));
+            it.sat = Math.round(Math.max(-1.3, Math.min(0.85, (it.sat || 0) + (b.sat || 0))) * 1e5) / 1e5;
+          }
         }
         break;
       }
@@ -223,11 +246,12 @@ export class DemoApi {
         this.remember();
         const regroup = new Set();
         for (const c of cutsOf(b.keys)) {
-          if (b.locked != null && !!b.locked !== !!c.locked) { c.frozen = b.locked ? { exp: c.total.exp, wb: c.total.wb, slope: c.total.slope, offset: c.total.offset, black: c.total.black } : null; c.locked = !!b.locked; }
+          if (b.locked != null && !!b.locked !== !!c.locked) { c.frozen = b.locked ? { exp: c.total.exp, wb: c.total.wb, slope: c.total.slope, offset: c.total.offset, black: c.total.black, sat: c.total.sat } : null; c.locked = !!b.locked; }
           if (b.excluded != null && !!b.excluded !== !!c.excluded) { c.excluded = !!b.excluded; if (c.group) regroup.add(c.group); }
           if ("use_exp" in b) c.use_exp = b.use_exp;
           if ("use_wb" in b) c.use_wb = b.use_wb;
           if ("use_black" in b) c.use_black = b.use_black;
+          if ("use_sat" in b) c.use_sat = b.use_sat;
           if ("space" in b && b.space && b.space !== c.space) {
             const sp = s.spaces.find((x) => x.id === b.space);
             Object.assign(c, { space: b.space, space_user: b.space, space_label: sp ? sp.label : b.space, space_source: "user",

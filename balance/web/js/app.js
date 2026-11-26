@@ -200,6 +200,13 @@ function renderEmpty() {
     if (c.dwg === false && !c.aces && st.settings.apply_mode === "linear_gain") {
       rows.push(`${icon("i-warn")}<span>타임라인 색공간이 <b>${F.esc(c.timeline_space || "알 수 없음")}</b> 입니다. <b>DaVinci WG/Intermediate</b> 가 아니면 Gamma=Linear 노드의 Gain 이 실제 노출과 달라집니다. 프로젝트 설정 &gt; 컬러 매니지먼트에서 바꿔 주세요.</span>`);
     }
+    if (st.lut_error) {
+      rows.push(`${icon("i-warn")}<span>Resolve 의 <b>LUT 폴더</b>에 쓸 수 없어 채도 값을 적용하지 못했습니다. 폴더 쓰기 권한을 확인해 주세요.</span>`);
+    }
+    const nomatch = st.cuts.filter((x) => !x.match_node && Math.abs(x.total.sat - 1) > 0.004).length;
+    if (nomatch > 0) {
+      rows.push(`${icon("i-unlink")}<span><b>${F.esc(st.settings.match_label)}</b> 노드가 없는 컷이 ${nomatch}개 있습니다. 채도 값은 Resolve 에 쓸 수 없습니다.</span><button data-do="node-guide">노드 만드는 방법</button>`);
+    }
     const nonode = st.cuts.filter((x) => !x.node).length;
     if (nonode > 0) {
       rows.push(`${icon("i-unlink")}<span><b>${F.esc(st.settings.node_label)}</b> 노드가 없는 컷이 ${nonode}개 있습니다. 값은 계산하지만 Resolve 에는 쓸 수 없습니다.</span><button data-do="node-guide">노드 만드는 방법</button>`);
@@ -270,6 +277,7 @@ function renderGrid() {
     thumbs.setSource(c.id, c.thumb);
     if (ui.compare) thumbs.setGain(c.id, [1, 1, 1], [0, 0, 0], card.ready);
     else thumbs.setGain(c.id, c.total.slope, c.total.offset, card.ready);
+    thumbs.setLook(c.id, ui.compare ? 1 : c.total.sat, st.settings.density);
 
     // 표식
     const tags = [];
@@ -318,17 +326,19 @@ function buildPairs() {
       const ea = a.kind === "ramp" && a.edge ? a.edge.t : 0, eb = b.kind === "ramp" && b.edge ? b.edge.h : 0;
       const jump = ra === null || rb === null ? null : rb + eb - (ra + ea);
       // 확인 우선순위: 사람이 일부러 뺀 컷은 뒤로, 판단이 덜 끝난 컷은 앞으로
-      let risk = jump === null ? 0 : Math.abs(jump) / 0.15, note = "";
+      let risk = jump === null ? 0 : Math.abs(jump) / 0.15;
+      const notes = [];                                   // [중요도, 문구]. 가장 중요한 것 하나만 보여 준다
       for (const [c, side] of [[a, "앞"], [b, "뒤"]]) {
-        if (isSuggestion(c)) { risk += 2; note = note || `<span class="t-warn">${icon("i-ring")}</span><span>${side} 컷은 적용하지 않은 제안값</span>`; }
-        else if (c.space_warn) { risk += 2; note = note || `<span class="t-warn">${icon("i-warn")}</span><span>${side} 컷 입력 색공간 확인</span>`; }
-        else if (c.excluded) { risk += 0.1; note = note || `<span>${side} 컷은 매칭에서 제외</span>`; }
-        else if (!c.analyzed) { risk += 1.5; note = note || `<span>${side} 컷은 아직 분석 전</span>`; }
-        if (c.kind && F.KIND_ICON[c.kind]) { risk += 0.6; note = note || `${icon(F.KIND_ICON[c.kind])}<span>${side} 컷 ${F.KIND_LABEL[c.kind]}</span>`; }
+        if (isSuggestion(c)) { risk += 2; notes.push([5, `<span class="t-warn">${icon("i-ring")}</span><span>${side} 컷은 적용하지 않은 제안값</span>`]); }
+        else if (c.space_warn) { risk += 2; notes.push([4, `<span class="t-warn">${icon("i-warn")}</span><span>${side} 컷 입력 색공간 확인</span>`]); }
+        else if (c.excluded) { risk += 0.1; notes.push([2, `<span>${side} 컷은 매칭에서 제외</span>`]); }
+        else if (!c.analyzed) { risk += 1.5; notes.push([3, `<span>${side} 컷은 아직 분석 전</span>`]); }
+        if (c.kind && F.KIND_ICON[c.kind]) { risk += 0.6; notes.push([1, `${icon(F.KIND_ICON[c.kind])}<span>${side} 컷 ${F.KIND_LABEL[c.kind]}</span>`]); }
         if (hasAuto(c) && c.auto.exp_conf === "medium") risk += 0.3;
       }
       const gap = b.index - a.index - 1;
-      if (!note && gap > 0) note = `<span>사이에 다른 컷 ${gap}개</span>`;
+      if (gap > 0) notes.push([0, `<span>사이에 다른 컷 ${gap}개</span>`]);
+      const note = notes.length ? notes.sort((x, y) => y[0] - x[0])[0][1] : "";
       out.push({ key: a.id + "|" + b.id, a, b, gap, jump, risk, note });
     }
   }
@@ -368,6 +378,7 @@ function renderPairs() {
       thumbs.setSource(pr.key + ":" + side, url || c.thumb);
       if (ui.compare) thumbs.setGain(pr.key + ":" + side, [1, 1, 1], [0, 0, 0], p.ready[k]);
       else thumbs.setGain(pr.key + ":" + side, c.total.slope, c.total.offset, p.ready[k]);
+      thumbs.setLook(pr.key + ":" + side, ui.compare ? 1 : c.total.sat, ui.st.settings.density);
       f.classList.toggle("is-approx", !url);
       f.classList.toggle("is-selected", ui.sel.has(c.id));
       f.title = `${F.pad2(c.index)}  ${c.name}` + (url ? (side === "a" ? "  (끝 프레임)" : "  (첫 프레임)") : "  (분석 전이라 컷 가운데 프레임)");
@@ -602,7 +613,7 @@ function renderMeter() {
     setLayer("cut", ce[0], { text: Math.max(...ce) - Math.min(...ce) > 0.005 ? "여러 값" : null });
   }
   const it = groupMode ? [g.intent] : cuts.map((c) => c.intent);
-  const dirty = it.some((x) => Math.abs(x.exp) > 0.001 || Math.abs(x.temp) > 0.001 || Math.abs(x.tint) > 0.001);
+  const dirty = it.some((x) => Math.abs(x.exp) > 0.001 || Math.abs(x.temp) > 0.001 || Math.abs(x.tint) > 0.001 || Math.abs(x.sat || 0) > 1e-4);
   $("#btn-reset-intent").disabled = !dirty || groupMode;
 
   // 화이트밸런스
@@ -630,6 +641,28 @@ function renderMeter() {
     wn += `<span>${wn ? "/ " : ""}의도 ${parts.join(", ")}</span>`;
   }
   $("#wb-note").innerHTML = wn;
+
+  // 채도
+  let sv = 1, sMixed = false;
+  if (groupMode) sv = Math.pow(2, g.intent.sat || 0);
+  else { const vs = cuts.map((c) => c.total.sat); sv = vs[0]; sMixed = Math.max(...vs) - Math.min(...vs) > 0.004; }
+  $("#sat-val").textContent = sMixed ? "여러 값" : groupMode ? F.percent(sv, true) : F.percent(sv);
+  $("#sat-val").classList.toggle("is-zero", !sMixed && Math.abs(sv - 1) < 0.004);
+  const ss = $("#sw-sat"), hasSat = !groupMode && !!one && hasAuto(one) && one.auto.sat_method === "camera";
+  ss.hidden = groupMode || !one;
+  if (one) {
+    ss.setAttribute("aria-checked", String(!!one.total.use_sat));
+    ss.disabled = !hasSat || one.excluded || one.locked || !st.settings.sat_enabled || !one.total.use_exp;
+  }
+  $("#sat-down").disabled = $("#sat-up").disabled = allLocked;
+  let sn = "";
+  if (hasSat) sn = `<i class="conf" data-c="${one.auto.sat_conf}" title="${F.CONF[one.auto.sat_conf]}"></i><span>자동: 카메라 ${F.esc(one.auto.cam)} 를 기준 카메라에 맞춤 ${F.percent(one.auto.sat)}${one.total.use_sat ? "" : " (적용 안 함)"}</span>`;
+  else if (one && hasAuto(one) && one.auto.sat_method === "ref" && one.auto.cam) sn = `<span>기준 카메라 ${F.esc(one.auto.cam)}</span>`;
+  const si = groupMode ? 0 : one ? (one.intent.sat || 0) + (gi ? gi.sat || 0 : 0) : 0;
+  if (Math.abs(si) > 1e-4) sn += `<span>${sn ? "/ " : ""}의도 ${F.percent(Math.pow(2, si), true)}</span>`;
+  if (groupMode) sn = "<span>그룹 전체에 더하는 값</span>";
+  if (one && !one.match_node && Math.abs(one.total.sat - 1) > 0.004) sn = `<span class="is-warn">${F.esc(st.settings.match_label)} 노드가 없어 채도는 Resolve 에 쓰지 못합니다</span>`;
+  $("#sat-note").innerHTML = sn;
 
   // 컷 동작
   $("#m-actions").hidden = groupMode;
@@ -683,6 +716,10 @@ function renderMeter() {
     else if (ref) lines.push(`${F.pad2(ref.index)}번 컷에 나머지를 맞춥니다.`);
     else lines.push("기준 컷이 없습니다. 컷을 고르고 '기준 컷'을 누르세요. 지금은 그룹 중앙값에 맞춥니다.");
     if (g.identities) lines.push(`인물 ${g.identities}명을 구분했습니다.`);
+    if ((g.cameras || []).length > 1) {
+      const cams = g.cameras.map((c) => `${c.id} ${c.n}컷` + (c.ref ? " (기준)" : c.conf === "none" ? "" : ` 채도 ${F.percent(c.sat)}`)).join(", ");
+      lines.push(`카메라 ${g.cameras.length}대로 나눴습니다 (${g.cameras_by === "image" ? "영상 특성" : "파일 정보"} 기준): ${cams}.`);
+    }
     if (g.bridge) lines.push("기준 컷에 얼굴이 없어 밝기 분포로 이었습니다.");
     $("#g-note").innerHTML = lines.map(F.esc).join("<br>");
     $("#g-note").style.marginLeft = "0";
@@ -700,6 +737,14 @@ function intent(delta) {
   if (m === "none") return;
   if (m === "group") return act("intent", { scope: "group", group: activeGroup().id, ...delta });
   return act("intent", { scope: "cut", keys: selKeys(), ...delta });
+}
+
+function satNudge(dir, ev) {
+  const b = $(dir > 0 ? "#sat-up" : "#sat-down");
+  if (b.disabled || mode() === "none") return;
+  flash(b, "is-down", 130);
+  const k = ev && (ev.ctrlKey || ev.metaKey) ? 4 : ev && ev.shiftKey ? 0.4 : 1;      // 20% / 2% / 5%
+  intent({ sat: dir * k * ui.st.steps.sat });
 }
 
 function nudge(dir, ev) {
@@ -821,6 +866,11 @@ function settingsPop() {
     <div class="pop-row"><span>값이 바뀌면 바로 Resolve 에 쓰기</span>${sw("auto_apply", s.auto_apply)}</div>
     <div class="pop-row"><span>화이트밸런스도 맞추기</span>${sw("wb_enabled", s.wb_enabled)}</div>
     <div class="pop-row"><span>블랙/헤이즈도 맞추기<small>Linear Gain 방식에서만 동작합니다</small></span>${sw("black_enabled", s.black_enabled)}</div>
+    <div class="pop-row"><span>채도도 맞추기<small>카메라마다 다른 채도를 ${F.esc(s.match_label)} 노드의 LUT 로 맞춥니다</small></span>${sw("sat_enabled", s.sat_enabled)}</div>
+    <label class="pop-row"><span>채도를 바꿀 때 진한 색의 밝기<small>밀도. 일반 채도는 색이 밝아집니다</small></span>
+      <select data-set="density"><option value="0">밝아짐 (일반 채도)</option><option value="0.75">그대로</option><option value="1.25">조금 진하게</option><option value="2">진하게</option></select></label>
+    <label class="pop-row"><span>채도 LUT 를 넣을 노드 라벨</span>
+      <input type="text" data-set="match_label" value="${F.esc(s.match_label)}" maxlength="40" spellcheck="false" style="width:110px"></label>
     <div class="pop-row"><span>신뢰도 낮은 값도 적용<small>끄면 제안만 하고 사람이 고릅니다</small></span>${sw("apply_low", s.apply_low)}</div>
     <div class="pop-row"><span>컷을 고르면 Resolve 재생헤드 이동</span>${sw("follow_selection", s.follow_selection)}</div>
     <label class="pop-row"><span>로그 소스 기본 입력<small>Resolve 에 입력 색공간이 지정돼 있지 않을 때</small></span>
@@ -833,6 +883,7 @@ function settingsPop() {
     <div class="pop-foot">${st.app.name} ${st.app.version}${st.conn.resolve_version ? ", Resolve " + F.esc(st.conn.resolve_version) : ""}</div>`);
   $('[data-set="apply_mode"]', p).value = s.apply_mode;
   $('[data-set="default_log"]', p).value = s.default_log;
+  $('[data-set="density"]', p).value = String(s.density);
   p.addEventListener("click", (e) => {
     const b = e.target.closest(".switch[data-set]");
     if (b) {
@@ -843,7 +894,7 @@ function settingsPop() {
   });
   p.addEventListener("change", (e) => {
     const f = e.target.closest("select[data-set], input[data-set]");
-    if (f) act("settings", { [f.dataset.set]: f.value });
+    if (f) act("settings", { [f.dataset.set]: f.dataset.set === "density" ? Number(f.value) : f.value });
   });
   return p;
 }
@@ -867,6 +918,7 @@ function helpPop() {
     ${row(["↑", "↓"], "노출 올리기와 내리기 (3분의 1 스톱)")}
     ${row(["Shift", "↑"], "10분의 1 스톱씩")}
     ${row(["Ctrl", "↑"], "1 스톱씩")}
+    ${row(["[", "]"], "채도 낮추기와 올리기 (5%. Shift 2%, Ctrl 20%)")}
     ${row(["Tab"], "컷 ↔ 그룹 전체")}
     ${row(["R"], "기준 컷으로 지정")}
     ${row(["L"], "잠금")}
@@ -888,7 +940,8 @@ function nodeGuidePop() {
     <li>노드를 우클릭해 <b>Gamma 를 Linear</b> 로 바꿉니다. (설정에서 Offset 방식을 쓰면 건너뜁니다)</li>
     <li>프라이머리 팔레트에서 이 노드의 <b>Lum Mix 를 0</b> 으로 둡니다. 0 이 아니면 채널별 게인이 계산한 값 그대로 들어가지 않습니다.</li>
     <li>이 노드 구성을 나머지 컷에 복사하고, 위의 <b>타임라인 다시 읽기</b>를 누릅니다.</li>
-  </ol><div class="pop-foot" style="padding:10px 0 0">프로젝트의 타임라인 색공간은 DaVinci WG/Intermediate 여야 합니다. 이 노드는 ShotBalance 전용으로 두세요. 값을 쓸 때마다 노드의 프라이머리를 덮어씁니다.</div>`);
+    <li>채도까지 맞추려면 그 <b>바로 다음</b>에 노드를 하나 더 만들고 라벨을 <b>${F.esc(ui.st.settings.match_label)}</b> 로 바꿉니다. 이 노드의 Gamma 는 그대로 둡니다. 앱이 여기에 LUT 를 겁니다.</li>
+  </ol><div class="pop-foot" style="padding:10px 0 0">프로젝트의 타임라인 색공간은 DaVinci WG/Intermediate 여야 합니다. 두 노드는 ShotBalance 전용으로 두세요. 값을 쓸 때마다 노드의 프라이머리와 LUT 를 덮어씁니다.</div>`);
 }
 
 /* ────────────────────────────────────────────────────── 이벤트 연결 */
@@ -1011,6 +1064,9 @@ function wire() {
   $("#sw-auto").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_exp: !c.total.use_exp }); });
   $("#sw-wb").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_wb: !c.total.use_wb }); });
   $("#sw-black").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_black: !c.total.use_black }); });
+  $("#sw-sat").addEventListener("click", () => { const c = selCuts()[0]; if (c) act("cut", { keys: [c.key], use_sat: !c.total.use_sat }); });
+  hold($("#sat-up"), (e) => satNudge(1, e));
+  hold($("#sat-down"), (e) => satNudge(-1, e));
   $("#btn-reset-intent").addEventListener("click", () => intent({ reset: true }));
   $("#act-ref").addEventListener("click", () => toggleFlag("ref"));
   $("#act-lock").addEventListener("click", () => toggleFlag("locked"));
@@ -1052,6 +1108,8 @@ function wire() {
       case "ArrowLeft": e.preventDefault(); return ui.view === "edge" ? movePair(-1) : move(-1, e);
       case "ArrowUp": case "+": case "=": e.preventDefault(); return nudge(1, e);
       case "ArrowDown": case "-": case "_": e.preventDefault(); return nudge(-1, e);
+      case "]": e.preventDefault(); return satNudge(1, e);
+      case "[": e.preventDefault(); return satNudge(-1, e);
       case "Tab": if (mode() !== "none" && activeGroup() && ui.sel.size) { e.preventDefault(); ui.scope = ui.scope === "cut" ? "group" : "cut"; renderMeter(); } return;
       case "\\": if (!ui.compare) { ui.compare = true; $$("#seg-compare button").forEach((x) => x.classList.toggle("is-on", x.dataset.v === "before")); ui.view === "edge" ? renderPairs() : renderGrid(); } return;
       case "?": return openPop($("#btn-help"), helpPop(), "help");

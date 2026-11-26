@@ -32,6 +32,14 @@ export function pct(v, digits = 2) {
   return (p > 0 ? "+" : MINUS) + Math.abs(p).toFixed(digits) + "%";
 }
 
+/** 배수를 퍼센트로: 1.16 → 116%. signed 면 변화량으로: +16% */
+export function percent(v, signed = false) {
+  if (v == null || Number.isNaN(v)) return "";
+  const p = Math.round(v * 100);
+  if (!signed) return p + "%";
+  return p === 100 ? "0%" : (p > 100 ? "+" : MINUS) + Math.abs(p - 100) + "%";
+}
+
 export const BLACK_METHOD = {
   ref: "이 그룹의 기준 블랙",
   floor: "기준 컷의 블랙 플로어에 맞춤",

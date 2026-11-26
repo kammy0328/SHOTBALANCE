@@ -18,6 +18,14 @@ function buildLut(gain, offset, out) {
 }
 
 const lutR = new Uint8Array(256), lutG = new Uint8Array(256), lutB = new Uint8Array(256);
+
+// 채도 미리보기: 로그(log2 선형)에서 색도를 sat 배 한다. balance/color/lut.py 의 saturate 와 같은 식이다.
+// (실제 연산은 DI 코드값에서 한다. DI 는 0.0733 코드 = 1 스톱이라 κ 를 그만큼 환산한다)
+const W0 = 0.25, W1 = 0.6, W2 = 0.15, KAP = 40 * 0.07329248;
+const TN = 2048, TLO = -12, TRANGE = 20;
+const TONE = new Uint8Array(TN);
+for (let i = 0; i < TN; i++) TONE[i] = srgb8(Math.pow(1 - Math.exp(-K * Math.pow(2, TLO + (i / (TN - 1)) * TRANGE)), G));
+const tone = (l) => TONE[Math.max(0, Math.min(TN - 1, ((l - TLO) * ((TN - 1) / TRANGE)) | 0))];
 const DUR = 380;
 const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -40,7 +48,7 @@ export class Thumbs {
 
   attach(id, canvas, onReady) {
     const it = { id, canvas, ctx: canvas.getContext("2d", { willReadFrequently: false }), src: null, url: null,
-                 cur: [1, 1, 1, 0, 0, 0], from: [1, 1, 1, 0, 0, 0], to: [1, 1, 1, 0, 0, 0], t0: 0, visible: !this.io, dirty: false, onReady, out: null };
+                 cur: [1, 1, 1, 0, 0, 0], from: [1, 1, 1, 0, 0, 0], to: [1, 1, 1, 0, 0, 0], t0: 0, sat: 1, den: 0, visible: !this.io, dirty: false, onReady, out: null };
     canvas.__thumb = it;
     this.items.set(id, it);
     if (this.io) this.io.observe(canvas);
@@ -111,6 +119,16 @@ export class Thumbs {
     if (!this.raf) this.raf = requestAnimationFrame((t) => this._tick(t));
   }
 
+  /** 채도 배수와 밀도. 값이 바뀌면 다시 그린다 (트윈 없이). */
+  setLook(id, sat, den) {
+    const it = this.items.get(id);
+    if (!it || (Math.abs(it.sat - sat) < 0.002 && it.den === den)) return;
+    it.sat = sat;
+    it.den = den;
+    it.dirty = true;
+    if (it.visible) this._draw(it);
+  }
+
   _tick(now) {
     this.raf = 0;
     for (const it of this.anim) {
@@ -130,10 +148,27 @@ export class Thumbs {
   _draw(it, force = false) {
     if (!it.src || !it.out) return;
     if (!it.visible && !force) { it.dirty = true; return; }
-    buildLut(it.cur[0], it.cur[3], lutR); buildLut(it.cur[1], it.cur[4], lutG); buildLut(it.cur[2], it.cur[5], lutB);
-    const s = it.src, o = it.out.data;
-    for (let i = 0, n = s.length; i < n; i += 4) {
-      o[i] = lutR[s[i]]; o[i + 1] = lutG[s[i + 1]]; o[i + 2] = lutB[s[i + 2]]; o[i + 3] = 255;
+    const s = it.src, o = it.out.data, c = it.cur;
+    if (Math.abs(it.sat - 1) < 0.004) {
+      buildLut(c[0], c[3], lutR); buildLut(c[1], c[4], lutG); buildLut(c[2], c[5], lutB);
+      for (let i = 0, n = s.length; i < n; i += 4) {
+        o[i] = lutR[s[i]]; o[i + 1] = lutG[s[i + 1]]; o[i + 2] = lutB[s[i + 2]]; o[i + 3] = 255;
+      }
+    } else {
+      const sat = it.sat, den = it.den;
+      for (let i = 0, n = s.length; i < n; i += 4) {
+        const lr = Math.log2(Math.max(PRE[s[i]] * c[0] + c[3], 1e-5));
+        const lg = Math.log2(Math.max(PRE[s[i + 1]] * c[1] + c[4], 1e-5));
+        const lb = Math.log2(Math.max(PRE[s[i + 2]] * c[2] + c[5], 1e-5));
+        const mean = W0 * lr + W1 * lg + W2 * lb;
+        let p = mean;
+        if (den > 0) {
+          const mx = Math.max(lr, lg, lb);
+          const ar = Math.exp(KAP * (lr - mx)), ag = Math.exp(KAP * (lg - mx)), ab = Math.exp(KAP * (lb - mx));
+          p = mean + den * ((lr * ar + lg * ag + lb * ab) / (ar + ag + ab) - mean);
+        }
+        o[i] = tone(p + sat * (lr - p)); o[i + 1] = tone(p + sat * (lg - p)); o[i + 2] = tone(p + sat * (lb - p)); o[i + 3] = 255;
+      }
     }
     it.ctx.putImageData(it.out, 0, 0);
     it.dirty = false;
